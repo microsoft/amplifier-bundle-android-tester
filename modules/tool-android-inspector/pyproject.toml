@@ -1,0 +1,28 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "amplifier-module-tool-android-inspector"
+version = "0.1.0"
+description = "Android device/emulator inspection and interaction tool for Amplifier — selector-first uiautomator driving via adb"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+dependencies = []
+
+[project.entry-points."amplifier.modules"]
+tool-android-inspector = "amplifier_module_tool_android_inspector:mount"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["amplifier_module_tool_android_inspector"]

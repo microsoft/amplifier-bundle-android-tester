@@ -1,0 +1,27 @@
+bundle:
+  name: android-tester-behavior
+  version: 0.1.0
+  description: |
+    The behavior portion of the android-tester bundle — adds the android_inspector tool
+    and specialist agents for booting emulators, driving Android apps via the accessibility
+    tree, and verifying rendered UI. Can be composed into any bundle that needs Android
+    on-device testing capabilities.
+
+tools:
+  - module: tool-android-inspector
+    source: ../modules/tool-android-inspector
+    config:
+      android_home: ~/android-sdk
+      screenshot_dir: ~/.amplifier/android-sessions
+      default_timeout_s: 30
+      boot_timeout_s: 240
+
+agents:
+  include:
+    - android-tester:android-operator
+    - android-tester:android-visual-tester
+    - android-tester:android-debugger
+
+context:
+  include:
+    - android-tester:context/android-awareness.md
