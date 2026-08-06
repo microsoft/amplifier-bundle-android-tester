@@ -24,6 +24,8 @@ def test_input_schema_declares_all_operations(tool: AndroidInspectorTool) -> Non
         "list_devices",
         "start_emulator",
         "stop_emulator",
+        "doctor",
+        "create_avd",
         "install",
         "launch",
         "stop_app",
@@ -41,6 +43,14 @@ def test_input_schema_declares_all_operations(tool: AndroidInspectorTool) -> Non
     }
     assert set(op_enum) == expected
     assert schema["required"] == ["operation"]
+
+
+def test_input_schema_declares_port_parameter(tool: AndroidInspectorTool) -> None:
+    """Defect 1 regression guard: 'port' must be a declared parameter, not
+    silently accepted-and-ignored. See test_avd.py for start_emulator's use
+    of it (validation, argv threading, exact-serial wait)."""
+    schema = tool.input_schema
+    assert schema["properties"]["port"]["type"] == "integer"
 
 
 async def test_execute_missing_operation_errors(tool: AndroidInspectorTool) -> None:
@@ -81,3 +91,27 @@ async def test_execute_swipe_missing_coords_errors(tool: AndroidInspectorTool) -
     result = await tool.execute({"operation": "swipe"})
     assert result["success"] is False
     assert "x1" in result["error"]
+
+
+async def test_execute_create_avd_missing_name_errors(
+    tool: AndroidInspectorTool,
+) -> None:
+    result = await tool.execute({"operation": "create_avd"})
+    assert result["success"] is False
+    assert "name" in result["error"]
+
+
+async def test_execute_doctor_never_fails_and_returns_full_report(
+    tool: AndroidInspectorTool,
+) -> None:
+    # doctor performs real (but read-only / non-destructive) host checks --
+    # it must never raise or return success=False regardless of what it
+    # finds on this particular host.
+    result = await tool.execute({"operation": "doctor"})
+    assert result["success"] is True
+    assert isinstance(result["ready"], bool)
+    assert isinstance(result["checks"], list)
+    assert len(result["checks"]) == 10
+    assert isinstance(result["summary"], str)
+    for check in result["checks"]:
+        assert check["status"] in ("ok", "warn", "fail")

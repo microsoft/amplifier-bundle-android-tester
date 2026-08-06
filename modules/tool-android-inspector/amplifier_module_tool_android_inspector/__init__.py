@@ -33,8 +33,17 @@ from .adb import (
     resolve_target_serial,
 )
 from .adb import list_raw_devices as _list_raw_devices
+from .avd import (
+    AvdError,
+    require_avd_exists,
+    run_doctor,
+)
+from .avd import (
+    create_avd as _create_avd_impl,
+)
 from .emulator import (
     EmulatorError,
+    resolve_emulator_binary,
 )
 from .emulator import (
     start_emulator as _start_emulator_impl,
@@ -71,6 +80,8 @@ _OPERATIONS = (
     "list_devices",
     "start_emulator",
     "stop_emulator",
+    "doctor",
+    "create_avd",
     "install",
     "launch",
     "stop_app",
@@ -177,8 +188,15 @@ class AndroidInspectorTool:
             "- list_devices: enumerate attached devices; errors on ambiguity (>1 ready "
             "device, no explicit serial)\n"
             "- start_emulator: boot an AVD (avd, port), applying host workarounds, "
-            "returns serial\n"
-            "- stop_emulator: kill the emulator and reap its process\n\n"
+            "returns serial. Fast-fails immediately (no 60s timeout) if the AVD does "
+            "not exist, naming existing AVDs and the avdmanager remediation command\n"
+            "- stop_emulator: kill the emulator and reap its process\n"
+            "- doctor: full host readiness report (ANDROID_HOME, adb, emulator binary, "
+            "KVM, ptrace_scope/gdb, AVDs, cmdline-tools) -- every check runs even if "
+            "an earlier one fails; never errors, always returns a report\n"
+            "- create_avd: provision a new AVD from an installed or "
+            "sdkmanager-installable system image; never clobbers an existing AVD or "
+            "silently accepts SDK licenses\n\n"
             "App lifecycle:\n"
             "- install: adb install -r -g (reinstall, grant all runtime perms)\n"
             "- launch: component -> am start directly (most deterministic); package -> "
@@ -230,7 +248,78 @@ class AndroidInspectorTool:
                         "device, or errors if zero/ambiguous."
                     ),
                 },
-                "avd": {"type": "string", "description": "AVD name (start_emulator)"},
+                "avd": {
+                    "type": "string",
+                    "description": (
+                        "AVD name to boot (start_emulator). Must already exist -- "
+                        "fast-fails immediately (no 60s timeout) if not. See 'doctor' "
+                        "and 'create_avd' to provision one. Not the same as 'name' "
+                        "(create_avd's new-AVD name)."
+                    ),
+                },
+                "port": {
+                    "type": "integer",
+                    "description": (
+                        "Emulator console port (start_emulator). Must be even and "
+                        "in the 5554-5682 range adb scans for emulator consoles -- "
+                        "the emulator uses 'port' for its console and 'port + 1' "
+                        "for adb. Invalid values are rejected before anything is "
+                        "launched -- never silently ignored or adjusted. When "
+                        "given, start_emulator waits on the deterministic serial "
+                        "'emulator-<port>' rather than 'any new serial', and "
+                        "refuses to launch if that serial is already attached to "
+                        "another device/emulator."
+                    ),
+                },
+                "name": {
+                    "type": "string",
+                    "description": "New AVD name to create (create_avd).",
+                },
+                "api_level": {
+                    "type": "integer",
+                    "default": 35,
+                    "description": "Android API level for the system image (create_avd)",
+                },
+                "tag": {
+                    "type": "string",
+                    "default": "google_apis",
+                    "description": (
+                        "System image tag, e.g. 'google_apis', 'google_apis_playstore' "
+                        "(create_avd)"
+                    ),
+                },
+                "abi": {
+                    "type": "string",
+                    "description": (
+                        "System image ABI, e.g. 'arm64-v8a', 'x86_64' (create_avd). "
+                        "Defaults to the host's native ABI (arm64-v8a on aarch64, "
+                        "x86_64 otherwise) -- detected, never hardcoded. Override "
+                        "only to request a non-native ABI."
+                    ),
+                },
+                "device": {
+                    "type": "string",
+                    "default": "pixel_6",
+                    "description": "avdmanager device profile, e.g. 'pixel_6' (create_avd)",
+                },
+                "accept_licenses": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "create_avd: auto-accept sdkmanager SDK licenses when the "
+                        "system image isn't already installed. False (default) fails "
+                        "loud instead of silently accepting licenses on your behalf."
+                    ),
+                },
+                "force": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "create_avd: overwrite an existing AVD of the same name. "
+                        "Without this, create_avd errors rather than silently "
+                        "clobbering an existing AVD."
+                    ),
+                },
                 "apk_path": {
                     "type": "string",
                     "description": "Path to a .apk (install)",
@@ -324,6 +413,10 @@ class AndroidInspectorTool:
                     return self._start_emulator(state, input)
                 case "stop_emulator":
                     return self._stop_emulator(state, input)
+                case "doctor":
+                    return self._doctor(state, input)
+                case "create_avd":
+                    return self._create_avd(state, input)
                 case "install":
                     return self._install(state, input)
                 case "launch":
@@ -358,6 +451,11 @@ class AndroidInspectorTool:
             # LaunchError subclasses AdbError -- must be caught before it, so
             # its structured `attempts` (and whatever else it learned) reach
             # the caller instead of being collapsed to a bare message.
+            return _err(str(exc), **exc.extra)
+        except AvdError as exc:
+            # Carries structured fields (existing_avds, remediation_command,
+            # missing_tools, ...) that must reach the caller intact -- same
+            # pattern as LaunchError.
             return _err(str(exc), **exc.extra)
         except SelectorError as exc:
             return _err(str(exc), candidates=[n.to_dict() for n in exc.candidates])
@@ -416,11 +514,32 @@ class AndroidInspectorTool:
         avd = inp.get("avd")
         if not avd:
             return _err("Missing required parameter: avd")
+
+        raw_port = inp.get("port")
+        port = int(raw_port) if raw_port is not None else None
+
+        # Fast-fail BEFORE spawning anything: a missing AVD is detectable
+        # instantly from <name>.ini files; it must never pay the ~60s
+        # device-appear timeout that a doomed launch would otherwise
+        # silently eat (measured: 60.0s to fail on a typo'd AVD name).
+        # Best-effort resolve the emulator binary for the -list-avds
+        # cross-check; if it doesn't resolve, require_avd_exists still
+        # checks disk and raises AvdError with existing_avds/remediation.
+        try:
+            probe_emulator_binary: str | None = resolve_emulator_binary(state.config)
+        except EmulatorError:
+            probe_emulator_binary = None
+        require_avd_exists(avd, state.config, emulator_binary=probe_emulator_binary)
+
+        # `port` (even, in adb's console-scan range, and not already
+        # attached) is validated inside _start_emulator_impl, BEFORE the
+        # emulator process is ever spawned -- see emulator.start_emulator.
         result = _start_emulator_impl(
             avd=avd,
             adb_path=state.adb_path,
             config=state.config,
             run_dir=state.run_dir,
+            port=port,
         )
         state.registry[result["serial"]] = {
             "avd": avd,
@@ -446,6 +565,34 @@ class AndroidInspectorTool:
         result = _stop_emulator_impl(client, pid=meta.get("pid"))
         state.registry.pop(serial, None)
         result["serial"] = serial
+        return _ok(result)
+
+    def _doctor(
+        self, state: AndroidInspectorState, inp: dict[str, Any]
+    ) -> dict[str, Any]:
+        # run_doctor() never raises and never stops at the first failure --
+        # the whole point is to show everything wrong at once. `success` is
+        # always true here: a machine with problems is a successful
+        # diagnosis, not a tool error.
+        report = run_doctor(state.config)
+        return _ok(report)
+
+    def _create_avd(
+        self, state: AndroidInspectorState, inp: dict[str, Any]
+    ) -> dict[str, Any]:
+        name = inp.get("name")
+        if not name:
+            return _err("Missing required parameter: name")
+        result = _create_avd_impl(
+            name=name,
+            config=state.config,
+            api_level=int(inp.get("api_level", 35)),
+            tag=str(inp.get("tag", "google_apis")),
+            abi=inp.get("abi"),
+            device=str(inp.get("device", "pixel_6")),
+            accept_licenses=bool(inp.get("accept_licenses", False)),
+            force=bool(inp.get("force", False)),
+        )
         return _ok(result)
 
     # -- App lifecycle ----------------------------------------------------

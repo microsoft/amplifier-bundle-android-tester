@@ -154,12 +154,29 @@ amplifier-bundle-android-tester/
         └── ui.py                dump parsing, selectors, verified interaction protocol
 ```
 
+## Environment setup
+
+The bundle assists with setup; it does not install an SDK for you.
+
+| Operation | Does |
+|---|---|
+| `doctor` | 10 executable checks (arch, `ANDROID_HOME`, adb binary + server, emulator binary, KVM, `ptrace_scope`, gdb, AVDs, cmdline-tools). Never stops at the first failure — returns every finding with its remediation, plus `ready` and a "fix this first" summary. |
+| `create_avd` | Wraps `sdkmanager` + `avdmanager`. ABI auto-detected from host arch. Won't clobber an existing AVD without `force`, won't accept SDK licences on your behalf, verifies via `emulator -list-avds` rather than trusting an exit code. |
+
+The prerequisite checklist is a **mechanism, not a prose reminder** — the same reason selectors are
+resolved in the tool rather than described in an agent file. A checklist an agent is told to follow
+gets skipped when a run gets long; a `doctor` call does not.
+
+**Not automated, deliberately:** installing the Android SDK, and downloading the community
+linux-aarch64 emulator build. The latter is an unsigned third-party binary; whether to put it on a
+machine is a human's trust decision, not a tool's. `doctor` detects the gap and points at
+`docs/TROUBLESHOOTING.md`, which carries the URL and sha256.
+
 ## Explicitly deferred
 
 Named so they don't get rediscovered as gaps:
 
-- **Snapshots.** Every boot is cold (~60s). Deferred in both source projects; still deferred.
-- **AVD provisioning.** Neither source repo scripts `avdmanager create`. Assume a pre-existing AVD; fail loudly with the command if absent.
+- **Snapshots.** Every boot is cold (~35–60s). Deferred in both source projects; still deferred.
 - **DTU integration.** Compose `digital-twin-universe` later if emulators need containerising.
 - **reality-check integration.** A future `type: mobile` acceptance test routing here.
 - **Physical devices over Tailscale ADB.** Works today via the same serial contract; port changes on every re-pair, so discovery is out of scope.

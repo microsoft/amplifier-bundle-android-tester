@@ -116,6 +116,31 @@ class FakeAdbClient:
         return AdbCommandResult(args=list(args), returncode=0, stdout="", stderr="")
 
 
+@dataclass
+class FakeProcess:
+    """Test double for a Popen-like process handle (Defect 2: dead-process
+    detection). `.poll()` returns `None` (alive) until it has been called
+    `exit_after` times, then reports `exit_returncode` on every call after
+    that -- lets a test simulate a process dying partway through a wait
+    loop rather than being dead (or alive) for the whole test."""
+
+    pid: int
+    exit_after: int | None = None
+    exit_returncode: int = -11  # SIGSEGV by default
+    calls: int = field(default=0, init=False)
+    returncode: int | None = field(default=None, init=False)
+
+    def poll(self) -> int | None:
+        self.calls += 1
+        if (
+            self.returncode is None
+            and self.exit_after is not None
+            and self.calls >= self.exit_after
+        ):
+            self.returncode = self.exit_returncode
+        return self.returncode
+
+
 class RecordingRunner:
     """An injectable AdbClient runner that records every argv it was called
     with and returns canned results keyed by the argv tuple *after*

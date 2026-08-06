@@ -20,11 +20,12 @@ operation, and its result always carries a warning.
 | `amplifier_module_tool_android_inspector/__init__.py` | `AndroidInspectorTool` + `mount()` — verb dispatch |
 | `amplifier_module_tool_android_inspector/adb.py` | Serial-scoped adb wrapper — every device-scoped call carries `-s <serial>` |
 | `amplifier_module_tool_android_inspector/emulator.py` | Host-workaround-aware emulator lifecycle (gdb/ptrace_scope, two-stage readiness) |
+| `amplifier_module_tool_android_inspector/avd.py` | AVD discovery/fast-fail, host readiness (`doctor`), provisioning (`create_avd`) |
 | `amplifier_module_tool_android_inspector/ui.py` | Dump parsing, selectors, the verified interaction protocol |
 
 ### Operations
 
-**Device & emulator lifecycle:** `list_devices`, `start_emulator`, `stop_emulator`
+**Device & emulator lifecycle:** `list_devices`, `start_emulator`, `stop_emulator`, `doctor`, `create_avd`
 **App lifecycle:** `install`, `launch`, `stop_app`
 **Sensing:** `screenshot`, `ui_dump`, `find`, `logcat`
 **Interacting:** `tap`, `tap_xy`, `type_text`, `key`, `swipe`
@@ -80,15 +81,37 @@ silent first-match.
    `sleep()` standing in for it anywhere. Short settle delays after an input
    event (`SETTLE_AFTER_TAP_S`, `SETTLE_AFTER_TEXT_S` in `ui.py`) are named
    constants, not ad-hoc waits.
-6. **`start_emulator`** detects `kernel.yama.ptrace_scope != 0` and launches
-   under `gdb -batch` with a script containing `set pagination off` /
-   `set confirm off` / `handle all nostop noprint pass` / `run -avd ...`
-   ("handle all" is load-bearing — QEMU uses SIGUSR1/SIGUSR2/SIGCONT
+6. **`start_emulator`** fast-fails immediately if the requested AVD does not
+   exist — **before** resolving/spawning anything else. Measured live: a
+   missing AVD used to silently eat the full 60s device-appear timeout
+   before reporting failure. The check consults `<name>.ini` files under the
+   AVD home (`$ANDROID_AVD_HOME`, else `$ANDROID_SDK_HOME/.android/avd`,
+   else `~/.android/avd`), cross-checked with `emulator -list-avds` when the
+   emulator binary resolves. The error names every AVD that DOES exist (a
+   typo is instantly obvious) and the exact `avdmanager create avd`
+   remediation command (ABI detected from the host, never hardcoded), plus
+   a pointer to `create_avd`. See `avd.py::require_avd_exists`. Once past
+   that check, `start_emulator` detects `kernel.yama.ptrace_scope != 0` and
+   launches under `gdb -batch` with a script containing `set pagination
+   off` / `set confirm off` / `handle all nostop noprint pass` / `run -avd
+   ...` ("handle all" is load-bearing — QEMU uses SIGUSR1/SIGUSR2/SIGCONT
    internally). Always passes `-no-window -no-snapshot -no-boot-anim -gpu
    swiftshader_indirect`. Launches detached (`start_new_session=True`, stdin
-   from `/dev/null`, output to a log file). Snapshots `adb devices` before
-   launch and accepts only a genuinely new serial. Then `wait-for-device`,
-   poll `sys.boot_completed`, `input keyevent 82`.
+   from `/dev/null`, output to a log file). An explicit `port` is validated
+   (even, in the 5554-5682 range adb scans — see `validate_emulator_port`)
+   before anything is launched, threaded into the argv as `-port <port>`,
+   and — since the resulting serial is then deterministic
+   (`emulator-<port>`) — waited on exactly, refusing to launch at all if
+   that serial is already attached to another device/emulator. Without a
+   `port`, snapshots `adb devices` before launch and accepts only a
+   genuinely new serial. Either way, every wait stage (serial appearance,
+   device-ready, `sys.boot_completed`) polls the launched process for
+   liveness and stops the moment it has exited — with the exit code/signal
+   and a diagnostic log excerpt — rather than running out the full timeout
+   on a process that can never respond (measured live: a segfaulted
+   emulator used to leave the tool waiting the full 240s boot timeout
+   before reporting a bare "adb timed out" symptom instead of the cause).
+   Then `wait-for-device`, poll `sys.boot_completed`, `input keyevent 82`.
 7. **`list_devices`** treats ambiguity (no serial configured, >1 ready
    device) as an error listing them, demanding an explicit serial. Offline
    and unauthorized devices are reported distinctly, never silently treated
@@ -110,6 +133,29 @@ silent first-match.
 11. **Fail loud, no fallbacks.** Errors return a structured `{"success":
     false, "error": "..."}` envelope with concrete remediation — never a
     synthetic/degraded result or a silently-masked retry.
+12. **`doctor`** never raises and never stops at the first failure — every
+    one of its 10 checks (host arch/OS, `ANDROID_HOME`, adb binary, adb
+    server reachability, emulator binary, KVM, `ptrace_scope`, gdb presence,
+    AVDs available, `sdkmanager`/`avdmanager` presence) runs regardless of
+    whether an earlier check failed, so the report always shows everything
+    wrong at once. Each check returns `{name, status: ok|warn|fail, detail,
+    remediation}`; the envelope adds a top-level `ready` (true iff no
+    `fail`) and a `summary` naming what to fix first. `success` is always
+    `true` for this operation — a machine with problems is a successful
+    diagnosis, not a tool error. This makes the prerequisite checklist
+    (otherwise only prose in `agents/android-operator.md`) structural
+    rather than a reminder that decays. See `avd.py::run_doctor`.
+13. **`create_avd`** provisions a new AVD, failing loud throughout: it never
+    silently clobbers an existing AVD (requires `force: true` to overwrite),
+    never silently accepts an SDK license (requires `accept_licenses: true`
+    to auto-accept when a system image isn't installed), never silently
+    substitutes a different ABI/API level than requested (ABI defaults to
+    the host's native arch — `arm64-v8a` on aarch64, `x86_64` otherwise —
+    detected, not hardcoded, but is always overridable), and never trusts
+    `avdmanager`'s exit code alone — it verifies the AVD actually appears in
+    `emulator -list-avds` afterward (falling back to an `.ini`-file disk
+    check if the emulator binary itself doesn't resolve). See
+    `avd.py::create_avd`.
 
 ### Configuration (via `mount()` config, i.e. `behaviors/android-tester.yaml`)
 
@@ -125,6 +171,7 @@ silent first-match.
 | `gdb_path` | `gdb` on PATH | Explicit gdb binary override |
 | `device_appear_timeout_s` | `60.0` | Wait for a new serial after launch |
 | `boot_timeout_s` | `240.0` | Wait for `sys.boot_completed` |
+| `avd_home` | `$ANDROID_AVD_HOME`, else `$ANDROID_SDK_HOME/.android/avd`, else `~/.android/avd` | Explicit AVD home override (`start_emulator`, `doctor`, `create_avd`) |
 
 ### Testing
 

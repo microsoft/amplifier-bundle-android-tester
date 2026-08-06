@@ -31,8 +31,9 @@ Three specialist agents drive it: an **operator** (boot → install → launch �
 ## Prerequisites
 
 - An Android SDK at `ANDROID_HOME` (default `~/android-sdk`) with an `emulator` binary and a working `adb`
-- A pre-existing AVD (this bundle does not provision AVDs — it fails loudly with the `avdmanager` command if none exists)
 - `/dev/kvm` readable and writable for hardware acceleration
 - On aarch64 Linux hosts: a native-arch `adb` and a linux-aarch64 emulator build — see `android-tester:docs/TROUBLESHOOTING.md`
+
+The `doctor` operation reports every host problem at once, each with its fix, and `create_avd` provisions an AVD when none exists. Setup gaps are a diagnosable path, not a dead end — the bundle does not install the SDK itself.
 
 @foundation:context/shared/common-system-base.md

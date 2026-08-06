@@ -64,18 +64,43 @@ If a selector will not resolve, that is a **finding to report**. It is never a l
 
 ## Prerequisites Self-Check — REQUIRED
 
-Run this before any test. If any check fails, **report the failure and the fix, then stop.** Do not improvise workarounds — the workarounds for this domain are host-specific and getting them wrong wastes hours.
+**Call `doctor` first. Act on its report.** This is the first call of every run, before `list_devices`, before anything.
 
-1. **adb works:** `adb version` returns a version, not `Exec format error`
-   - On aarch64: `platform-tools/adb` is x86_64-only. A native-arch adb is required.
-2. **Emulator binary present:** `$ANDROID_HOME/emulator/emulator` exists
-   - On linux-aarch64: Google ships none. A community build must already be installed.
-3. **KVM available:** `/dev/kvm` is readable and writable
-4. **Target AVD exists:** the named AVD is present under `~/.android/avd/`
-   - This bundle does **not** provision AVDs. Report the `avdmanager create avd` command and stop.
-5. **APK exists** (if installing): the path resolves to a readable file
+```python
+report = android_inspector(operation="doctor")
+```
+
+No parameters, never raises, always returns a full report. Ten checks — host arch/OS, `ANDROID_HOME`, adb binary, adb server plus the state of every attached device, emulator binary, KVM, `ptrace_scope`, gdb, AVDs available, cmdline-tools. It does **not** stop at the first failure: the point is to show everything wrong at once, so a broken host is fixed in one pass instead of being discovered one failed operation at a time. Measured at **0.26s** on a healthy host — there is no version of "this run is too short to afford it".
+
+Read three fields:
+
+| Field | Meaning |
+|---|---|
+| `ready` | `false` if any check reported `fail` |
+| `checks[]` | each with `name`, `status` (`ok` / `warn` / `fail`), `detail`, `remediation` |
+| `summary` | names what to fix **first** |
+
+**If `ready` is false: report the failing checks with their `remediation` text verbatim, then stop.** Do not improvise workarounds — the workarounds for this domain are host-specific and getting them wrong wastes hours. Note that `success` is true whenever a report was produced: a broken machine is a *successful diagnosis*, not a tool error, and it is never permission to proceed.
+
+`warn` needs judgment rather than a stop:
+
+- `ptrace_scope != 0` — expected on this class of host. `start_emulator` applies the gdb wrapper itself. Proceed.
+- **Zero AVDs** — nothing to boot. Provision one, then continue:
+
+  ```python
+  android_inspector(operation="create_avd", name="my-harness")
+  ```
+
+  ABI is auto-detected from the host arch. It will not clobber an existing AVD without `force`, and it will not accept SDK licences on the user's behalf without `accept_licenses` — if the system image is not already local, it stops and says so rather than starting a multi-minute download nobody asked for.
+
+Two things `doctor` cannot check for you:
+
+1. **The AVD you intend to boot is among the ones it listed.** (`start_emulator` also fast-fails on a missing AVD in 0.02s, naming the AVDs that *do* exist — but knowing before you call is better than knowing after.)
+2. **APK exists** (if installing): the path resolves to a readable file.
 
 Missing prerequisites are a **complete, useful report** — not a failed run. Say exactly what is missing and exactly what fixes it.
+
+**Why a call and not a checklist:** this is the same argument as selectors being resolved inside the tool rather than described in prose. A checklist you are told to follow gets skipped at turn 40 of a long run, exactly when the run is hardest to debug. A `doctor` call does not.
 
 ## Core Workflow
 
@@ -95,6 +120,8 @@ serial = r["serial"]
 ```
 
 `start_emulator` owns the host workarounds (headless routing, tracer attachment under restricted ptrace, detached launch) and the two-stage readiness gate. Cold boot is ~60s; do not shorten `boot_timeout_s`.
+
+Its preconditions all run **before** anything is spawned, so a bad call costs hundredths of a second rather than a timeout: a missing AVD fails in 0.02s listing the AVDs that do exist, an invalid `port` (must be even, 5554–5682) in 0.04s, and a `port` already answered by an attached device in 0.04s — it refuses to launch rather than adopt an instance it did not start. That last refusal is the wrong-device-install hazard, caught structurally.
 
 **Pin `serial` in every subsequent call.**
 

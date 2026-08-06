@@ -50,11 +50,33 @@ includes:
 
 ### Prerequisites
 
-- Android SDK at `ANDROID_HOME` (default `~/android-sdk`) with an `emulator` binary and a working `adb`
-- **A pre-existing AVD** — this bundle does not provision AVDs; it fails loudly with the `avdmanager` command if none exists
-- `/dev/kvm` readable and writable
+**Start by asking the bundle.** `doctor` takes no parameters, never errors, and tells you everything that is wrong in one call:
 
-**On aarch64 Linux hosts, two things Google does not ship:**
+```python
+report = android_inspector(operation="doctor")
+# report["ready"]   — false if any check failed
+# report["checks"]  — [{name, status: ok|warn|fail, detail, remediation}, ...]
+# report["summary"] — what to fix first
+```
+
+Ten checks — host arch/OS, `ANDROID_HOME`, adb binary, adb server and attached device states, emulator binary, KVM, `ptrace_scope`, gdb, AVDs available, cmdline-tools. It deliberately **does not stop at the first failure**: you get the whole picture and fix the host in one pass, instead of discovering its problems one 60-second timeout at a time. Measured 0.26s on a healthy host. A broken machine is a *successful diagnosis*, not a tool error — read `ready`, not `success`.
+
+No AVD? `create_avd` provisions one. ABI is auto-detected from the host arch, it will not clobber an existing AVD without `force`, it will not accept SDK licences on your behalf without `accept_licenses`, and it verifies with `emulator -list-avds` afterwards rather than trusting an exit code:
+
+```python
+android_inspector(operation="create_avd", name="my-harness")   # 1.44s with the image already local
+```
+
+**What the bundle will not do for you**, and why:
+
+| Not automated | Why |
+|---|---|
+| Installing the Android SDK | Out of scope |
+| Downloading the community linux-aarch64 emulator build | It is an **unsigned third-party binary**. Whether it goes on a machine is a human's trust decision, not a tool's. `doctor` detects the gap and points you at [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md), which carries the URL and sha256 |
+
+So the underlying requirements remain: an Android SDK at `ANDROID_HOME` (default `~/android-sdk`), a working `adb`, an `emulator` binary, and `/dev/kvm` readable and writable.
+
+**On aarch64 Linux hosts, two things Google does not ship** — `doctor` reports both by name:
 
 | Need | Problem | Fix |
 |---|---|---|
@@ -62,8 +84,6 @@ includes:
 | `emulator` | No linux-aarch64 emulator exists in Google's SDK repo | A community linux-aarch64 build + hand-written `package.xml` |
 
 Full detail, including the `libpcre2` boot crash and the `ptrace_scope` workaround, in [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
-
-**Verify:** `adb version` prints a version · `[ -r /dev/kvm ] && [ -w /dev/kvm ]` · `emulator -accel-check`
 
 ### Basic Usage
 
@@ -120,8 +140,10 @@ Use for: non-responsive controls, text that lands in the wrong field, blank scre
 
 | Operation | Description | Key params |
 |-----------|-------------|-----------|
+| `doctor` | 10-check host readiness report; runs every check, never errors | — |
+| `create_avd` | Provision an AVD (ABI auto-detected; won't clobber or auto-accept licences) | `name`, `api_level`, `tag`, `abi`, `device` |
 | `list_devices` | Enumerate devices; ambiguity is an **error** | — |
-| `start_emulator` | Boot AVD with host workarounds + readiness gate | `avd`, `port` |
+| `start_emulator` | Boot AVD with host workarounds + readiness gate. Missing AVD, invalid port, and occupied port all fail **before** anything spawns | `avd`, `port` |
 | `stop_emulator` | `adb emu kill` + process reap | `serial` |
 | `install` | Install APK with `-r -g` | `serial`, `apk_path` |
 | `launch` | Start app, wait for focus to settle | `serial`, `package` |
@@ -164,9 +186,13 @@ See the measurement at the top. This is the single decision every other one foll
 
 It is a **crash workaround, not an optimisation.** On this class of host, the windowed qemu binary needs `libpcre2-16.so.0` and segfaults during display setup without it; headless routes to a different binary with no Qt dependency. Removing the flag to "get a visible window" reintroduces a deterministic segfault whose log points at display configuration rather than at the missing library.
 
+### Why setup is a tool call, not a checklist
+
+The prerequisite checklist used to live as prose in the agent files. That is the same mistake as describing selector resolution instead of enforcing it: a checklist an agent is told to follow gets skipped when a run gets long. `doctor` is the checklist made structural — one call, every finding, with remediation attached.
+
 ### Explicitly deferred
 
-Named so they are not rediscovered as gaps: **snapshots** (every boot is cold, ~60s), **AVD provisioning** (assumes a pre-existing AVD), **containerised emulators** (compose `digital-twin-universe` later), **physical-device discovery over Tailscale ADB** (works via the same serial contract; the port changes on every re-pair).
+Named so they are not rediscovered as gaps: **snapshots** (every boot is cold, ~60s), **SDK installation and the community aarch64 emulator download** (`doctor` detects and explains both; installing them is the human's call), **containerised emulators** (compose `digital-twin-universe` later), **physical-device discovery over Tailscale ADB** (works via the same serial contract; the port changes on every re-pair).
 
 ## Related Bundles
 

@@ -36,8 +36,9 @@ The agents hold the procedural safety that raw adb does not enforce: serial scop
 ## Prerequisites
 
 - Android SDK at `ANDROID_HOME` (default `~/android-sdk`) with `emulator` and a working `adb`
-- A pre-existing AVD — this bundle does not provision AVDs
 - `/dev/kvm` readable and writable
 - On aarch64 Linux: native-arch `adb` (`platform-tools/adb` from Google is x86_64-only) and a linux-aarch64 emulator build (Google ships none)
+
+**Setup problems are a supported path, not a dead end.** The bundle diagnoses (`doctor` — every host problem reported at once, each with its fix) and provisions (`create_avd`). It does not install the SDK.
 
 If prerequisites are missing, the agents report the exact fix and stop — they do not improvise workarounds.

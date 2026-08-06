@@ -51,6 +51,75 @@ And the *dangerous* case is not landing on nothing — it is landing on a **neig
 
 All operations take a `serial` (device serial). Every underlying `adb` call is serial-scoped — this is structural, not advisory. An APK was once installed onto the wrong project's emulator because a script picked the first serial in `adb devices`.
 
+### Environment Setup
+
+The bundle assists with setup. It does not install an SDK for you, and it does not download the community linux-aarch64 emulator build — see "The boundary" below.
+
+#### `doctor` — Full host readiness report
+
+```python
+report = android_inspector(operation="doctor")
+# report["ready"]    — bool: false if ANY check reported "fail"
+# report["checks"]   — [{name, status: "ok"|"warn"|"fail", detail, remediation}, ...]
+# report["summary"]  — names what to fix FIRST
+```
+
+**No required parameters. Never raises. Always returns a full report.** Ten checks:
+
+| Check | What it establishes |
+|---|---|
+| `host_platform` | Host OS and arch, and the AVD ABI that follows from it |
+| `android_home` | `ANDROID_HOME` / `ANDROID_SDK_ROOT` set, and the directory exists |
+| `adb_binary` | An adb that actually *executes* — on aarch64 the failure text is the arm64-specific fix, not a generic message |
+| `adb_server` | Server reachable; every attached device listed, with `offline` / `unauthorized` flagged |
+| `emulator_binary` | Resolves *and* runs. On aarch64 Linux, a failure points at TROUBLESHOOTING.md rather than pretending a download exists |
+| `kvm` | `/dev/kvm` present, readable, writable |
+| `ptrace_scope` | `kernel.yama.ptrace_scope`. Non-zero is a `warn`, not a blocker — `start_emulator` applies the gdb wrapper itself |
+| `gdb_present` | gdb on PATH. `fail` only when `ptrace_scope != 0` makes it load-bearing |
+| `avds_available` | Which AVDs exist. None is a `warn` — see `create_avd` |
+| `cmdline_tools` | `sdkmanager` and `avdmanager`, needed by `create_avd` |
+
+**It does not stop at the first failure.** Every check runs regardless of what came before, because the point is to show everything wrong at once. Fixing a host one 60-second timeout at a time is precisely the experience this operation exists to delete. Measured **0.26s** on a healthy host.
+
+**`success` is true whenever a report was produced.** A broken machine is a *successful diagnosis*, not a tool error. Read `ready`, not `success`, to decide whether to proceed — and when `ready` is false, report the failing checks with their `remediation` text and stop.
+
+#### `create_avd` — Provision an AVD
+
+```python
+result = android_inspector(
+    operation="create_avd",
+    name="my-harness",       # required — the NEW AVD's name (not `avd`, which names one to boot)
+    api_level=35,            # default 35
+    tag="google_apis",       # default
+    abi=None,                # default: detected from host arch
+    device="pixel_6",        # default — avdmanager device profile
+    accept_licenses=False,   # default
+    force=False,             # default
+)
+# result["name"], ["package"], ["abi"], ["device"]
+# result["downloaded"]           — was a system image fetched?
+# result["verification_method"]  — how existence was confirmed afterwards
+# result["verified"]             — always True on success; the operation errors otherwise
+```
+
+Wraps `sdkmanager` + `avdmanager`. It fails loud at every point where a convenience default would be a decision made on the user's behalf:
+
+| Guard | Behaviour |
+|---|---|
+| **ABI** | Auto-detected from host arch — `arm64-v8a` on aarch64, `x86_64` otherwise. Detected, never hardcoded. Override only for a deliberately non-native ABI |
+| **Existing AVD** | Refuses to clobber one without `force`, and names the AVDs that already exist |
+| **SDK licences** | Will not accept them on the user's behalf. If the system image is not already local and `accept_licenses` is false, it stops and says so rather than starting a multi-minute download nobody asked for |
+| **Verification** | Confirms via `emulator -list-avds` afterwards rather than trusting the exit code. `avdmanager` reporting success is not proof the AVD is there |
+
+Measured **1.44s** when the system image was already local; the resulting AVD then booted successfully. Add several minutes if the image has to be downloaded.
+
+#### The boundary
+
+Two things are deliberately **not** automated:
+
+- **Installing the Android SDK.** Out of scope.
+- **Downloading the community linux-aarch64 emulator build.** It is an unsigned third-party binary; whether it goes on a machine is a human's trust decision, not a tool's. `doctor` detects the gap and points at `docs/TROUBLESHOOTING.md`, which carries the URL and sha256.
+
 ### Device & Emulator Lifecycle
 
 #### `list_devices` — Enumerate attached devices
@@ -67,8 +136,8 @@ result = android_inspector(operation="list_devices")
 ```python
 result = android_inspector(
     operation="start_emulator",
-    avd="my-harness",
-    port=5556,            # optional; pick a free even port
+    avd="my-harness",     # must already exist — see `create_avd`
+    port=5556,            # optional; must be even, in 5554–5682
 )
 serial = result["serial"]   # e.g. "emulator-5556"
 ```
@@ -83,7 +152,29 @@ Never treat stage 1 as "ready". Between stage 1 and stage 2 the device answers a
 
 Cold boot is ~60s wall clock on a native-arch KVM host. `boot_timeout_s` defaults to 240.
 
-**This bundle does not create AVDs.** If the named AVD does not exist, the tool fails loudly with the `avdmanager create avd` command you need.
+##### Preconditions — all checked before anything is spawned
+
+A bad call costs hundredths of a second, not a timeout. Each of these used to be discovered the slow way.
+
+| Precondition | Behaviour | Measured |
+|---|---|---|
+| **AVD exists** | Checked from `<name>.ini` on disk, cross-checked against `emulator -list-avds`. On a miss the error carries the name you asked for, **the AVDs that do exist** (so a typo is instantly obvious), and the exact `avdmanager create avd ...` command — plus a pointer to `create_avd` | **0.02s** |
+| **`port` is valid** | Must be even and within 5554–5682. The emulator uses `port` for its console and `port + 1` for adb, and adb only scans that range for consoles — an odd or out-of-range port leaves the adb port undiscoverable. Rejected with the constraint explained; never silently adjusted | **0.04s** |
+| **`port` is free** | If a device is already attached on the requested port, it **refuses to launch** rather than adopting an instance it did not start | **0.04s** |
+
+That last one is the same hazard as the recorded wrong-device install: operating on someone else's running emulator, silently, because the serial happened to answer. The refusal is the point — choose a different port, or stop whatever is using that one.
+
+`port` is genuinely honoured now. It was previously accepted and discarded, which meant a run that carefully picked a free port got whatever port the emulator chose. When `port` is given, the expected serial is deterministic (`emulator-<port>`) and the tool waits on *that exact serial* rather than the "any new serial appeared" heuristic it must use without one.
+
+##### Failures during boot name the cause, not the symptom
+
+Every wait stage polls the launched process for liveness. If the emulator dies, the error arrives **the moment it dies** and names:
+
+- the **exit code**, or the **signal** that killed it (by name)
+- the **log path**
+- a **diagnostic excerpt** from that log, inline — so you see the cause without a second round trip
+
+Previously a dead emulator produced a 240s wait and then "adb timed out" — the symptom, reported long after the log had already named the cause. If you get one of these, read the excerpt first: `ptrace_scope` and the `libpcre2` display crash both have distinctive signatures documented in `docs/TROUBLESHOOTING.md`.
 
 #### `stop_emulator` — Shut down
 

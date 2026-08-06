@@ -72,12 +72,24 @@ Report the geometry from the dump, the appearance from the image. That combinati
 
 ## Prerequisites Self-Check — REQUIRED
 
-If any check fails, **report the failure and the fix, then stop.**
+**Call `doctor` first. Act on its report.**
 
-1. **adb works:** `adb version` returns a version, not `Exec format error`
-2. **Device or emulator reachable:** `list_devices` returns exactly one device, or the user has named a serial
-3. **App installed and launchable:** the target package is present
-4. **Screenshot path writable:** the configured `screenshot_dir` exists and is writable
+```python
+report = android_inspector(operation="doctor")
+```
+
+No parameters, never raises, always returns a full report — ten host checks (arch/OS, `ANDROID_HOME`, adb binary, adb server and every attached device's state, emulator binary, KVM, `ptrace_scope`, gdb, AVDs, cmdline-tools). It does **not** stop at the first failure: you get the whole broken-host picture in one call, at a measured **0.26s** on a healthy host.
+
+**If `ready` is false, report the failing `checks[]` with their `remediation` text and stop.** `success` is true whenever a report was produced — a broken machine is a successful diagnosis, not a passing check, and never a licence to start capturing. If no AVD exists and you need to boot one, `create_avd` provisions it (`operation="create_avd", name="my-harness"`).
+
+A checklist you are told to follow gets skipped somewhere around the fourth screen of a long sweep. A `doctor` call does not — which is the same reason your coordinates come from the tool and not from your eyes.
+
+Then the two things specific to a capture run, which `doctor` cannot check:
+
+1. **Exactly one target device**, or a serial named by the user — confirm with `list_devices`
+2. **App installed and launchable**, and the configured `screenshot_dir` exists and is writable
+
+Missing prerequisites are a **complete, useful report** — not a failed run.
 
 ## Visual Testing Workflow
 

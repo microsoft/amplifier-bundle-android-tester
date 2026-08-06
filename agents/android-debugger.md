@@ -72,12 +72,25 @@ You must never reproduce that mistake yourself. Every coordinate you use comes f
 
 ## Prerequisites Self-Check — REQUIRED
 
-If any check fails, **report the failure and the fix, then stop.**
+**Call `doctor` first. Act on its report.**
 
-1. **adb works:** `adb version` returns a version, not `Exec format error`
-2. **Exactly one target device**, or a serial named by the user
-3. **App installed and launchable** — a launch failure is itself a complete finding
-4. **logcat readable:** `logcat` returns lines
+```python
+report = android_inspector(operation="doctor")
+```
+
+No parameters, never raises, always returns a full report — ten host checks (arch/OS, `ANDROID_HOME`, adb binary, adb server and every attached device's state, emulator binary, KVM, `ptrace_scope`, gdb, AVDs, cmdline-tools), and it does **not** stop at the first failure. Measured **0.26s** on a healthy host.
+
+This matters more for you than for anyone: **an unhealthy host produces symptoms that look exactly like app bugs.** An unauthorized device, a missing KVM, an emulator that never really booted — each of them presents as "the tap did nothing". Ruling the host out in one 0.26s call before you form any theory is cheaper than a wrong root cause, which sends someone to the wrong file.
+
+**If `ready` is false, report the failing `checks[]` with their `remediation` text and stop.** `success` is true whenever a report was produced — a broken machine is a successful diagnosis, not a passing check. If the AVD you need does not exist, `create_avd` provisions one (`operation="create_avd", name="my-harness"`).
+
+Then, specific to an investigation:
+
+1. **Exactly one target device**, or a serial named by the user
+2. **App installed and launchable** — a launch failure is itself a complete finding
+3. **logcat readable:** `logcat` returns lines
+
+Missing prerequisites are a **complete, useful report** — not a failed run.
 
 ## The Central Distinction
 

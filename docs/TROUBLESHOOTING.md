@@ -8,6 +8,8 @@ Most of these workarounds are **owned by the tool** — `start_emulator` applies
 
 ## Quick Reference: Symptom → Cause → Fix
 
+**Before working through this table by hand, run `doctor`** — one call, no parameters, ~0.26s, and it reports every host problem at once with its remediation instead of one per failed operation. Most rows below are things `doctor` names for you.
+
 | Symptom | Cause | Fix |
 |---|---|---|
 | `Exec format error` running `adb` | Google's `platform-tools/adb` is x86_64-only; no aarch64 build is shipped | Use a native-arch adb (`platform-tools-arm64/adb`). See [Wrong-architecture adb](#wrong-architecture-adb) |
@@ -20,6 +22,10 @@ Most of these workarounds are **owned by the tool** — `start_emulator` applies
 | `Could not init 'oss' audio driver` | Host audio backend fallback warning | Harmless. See [Audio driver warning](#audio-driver-warning) |
 | Device answers adb but `ui_dump` is empty | `wait-for-device` returned before Android finished booting | Two-stage gate. See [Readiness is two-stage](#readiness-is-two-stage) |
 | Boot never completes / hangs past 4 minutes | Keyguard, missing KVM, or a genuine boot failure | See [Boot timing expectations](#boot-timing-expectations) |
+| `start_emulator` error naming an exit code or signal, a log path, and log lines | The emulator process **died during boot**; the wait stages detected it immediately | Read the excerpt in the error. See [Emulator process died during boot](#emulator-process-died-during-boot) |
+| `start_emulator` refuses to launch: port already attached | A device already answers on that console port | Choose another port, or stop what is using it. See [Port already in use](#port-already-in-use-or-invalid) |
+| `start_emulator` rejects the `port` value outright | `port` must be even and within 5554–5682 | See [Port already in use](#port-already-in-use-or-invalid) |
+| `start_emulator` fails instantly naming other AVDs | The requested AVD does not exist (checked before spawning) | Fix the typo, or `create_avd`. See [AVD does not exist](#avd-does-not-exist) |
 | APK installed onto the wrong emulator | Script picked the first `emulator-NNNN` in `adb devices` | Always pin `serial`. See [Wrong device targeted](#wrong-device-targeted) |
 | Interactions silently stop working mid-run | Spontaneous ANR dialog stealing focus | `dismiss_anr`. See [Spontaneous ANR dialogs](#spontaneous-anr-dialogs) |
 | Typed text landed in the wrong field | Tap missed; no focus assertion before typing | See [Text went into the wrong field](#text-went-into-the-wrong-field) |
@@ -203,6 +209,49 @@ No x86-translation penalty on an arm64-on-arm64 host — this is arguably a *bet
 
 Listed here because it appears prominently in the launch log and looks alarming next to a genuine boot failure. It is not the cause of your boot failure.
 
+### AVD does not exist
+
+**Symptom:** `start_emulator` fails **immediately** (measured 0.02s), naming the AVD you asked for and listing the AVDs that actually exist.
+
+**Cause:** A typo, or an AVD that was never provisioned on this host.
+
+**Fix:** The error carries everything you need — the requested name, the existing names (so a typo is obvious on sight), and the exact `avdmanager create avd ...` command with the ABI already resolved for your host. Or provision it through the tool:
+
+```python
+android_inspector(operation="create_avd", name="my-harness")
+```
+
+**Why it is worth a section:** this check used to not exist. A typo'd AVD name burned the full **60s** device-appear timeout and then reported "no new adb device serial appeared" — a symptom four abstraction layers away from the cause. A missing AVD is detectable instantly from `<name>.ini` files under the AVD home, so the check now runs *before* any process is spawned.
+
+### Port already in use, or invalid
+
+**Symptom:** `start_emulator` refuses to launch (measured 0.04s), reporting that the requested port is already attached to a device.
+
+**Cause:** Something is already answering on `emulator-<port>` — another project's emulator, or a previous run that was never shut down.
+
+**Fix:** Choose a different even port, or stop whatever is using that one (`stop_emulator`, or `adb -s emulator-<port> emu kill`).
+
+**Why it refuses instead of continuing:** adopting a serial that already answers means operating on an instance this call did not start. That is precisely the [wrong device targeted](#wrong-device-targeted) failure — the one where an APK was installed onto a different project's emulator and driven for several steps before anyone noticed. A refusal is a two-second inconvenience; adoption is a silently wrong test run.
+
+**Related — invalid port:** `port` must be **even** and within **5554–5682**. The emulator uses `port` for its own console and `port + 1` for adb, and adb only scans that range looking for emulator consoles; an odd or out-of-range value leaves the adb port undiscoverable. Invalid values are rejected in 0.04s with the constraint explained — never silently adjusted, and never silently ignored (which is what happened before `port` was honoured at all).
+
+### Emulator process died during boot
+
+**Symptom:** `start_emulator` returns an error naming an **exit code or signal**, the **log path**, and a **diagnostic excerpt** from that log.
+
+**Cause:** The emulator process died. The error is telling you which of the crashes above you hit — read the excerpt first:
+
+| Excerpt shows | You are in |
+|---|---|
+| `Setting display: 0 configuration` then death | [The libpcre2 boot crash](#the-libpcre2-boot-crash) — the windowed binary. Ensure `-no-window` |
+| Death at startup with little else | [The ptrace_scope crash](#the-ptrace_scope-crash). Check `sysctl kernel.yama.ptrace_scope`; if non-zero, gdb must be installed for the wrapper |
+| Signal-terminated shortly after launch, gdb in the path | [gdb kills a healthy emulator](#gdb-kills-a-healthy-emulator) — `handle all` is load-bearing |
+| KVM / acceleration complaints | `/dev/kvm` not readable+writable. `doctor` reports this directly |
+
+**Fix:** Whatever the excerpt names. Run `doctor` if you want the host's full state rather than just this one failure.
+
+**Why the error looks like this now:** every wait stage polls the launched process for liveness, so a death is detected the moment it happens. Previously the process died silently and the run waited out the full 240s adb timeout before reporting "adb timed out" — the *symptom*, long after the emulator's own log had already named the *cause*. The excerpt is inlined into the error specifically so diagnosing it does not need a second round trip.
+
 ---
 
 ## Device Targeting Problems
@@ -331,6 +380,9 @@ Named here so they are not rediscovered as gaps:
 | Deferred | Why | Consequence |
 |---|---|---|
 | **Snapshots** | Deferred in both source projects | Every boot is cold (~60 s). Boot once per session |
-| **AVD provisioning** | Neither source repo scripts `avdmanager create` | Assumes a pre-existing AVD; the tool fails loudly with the command if absent |
+| **Android SDK installation** | Out of scope — the bundle assists with setup, it does not bootstrap a machine | `doctor` reports precisely what is missing and how to fix it |
+| **Downloading the community linux-aarch64 emulator** | It is an **unsigned third-party binary**. Whether it goes on a machine is a human's trust decision, not a tool's | `doctor`'s `emulator_binary` check detects the gap and points here — see [No aarch64 emulator from Google](#no-aarch64-emulator-from-google) for the URL and sha256 |
 | **Physical devices over Tailscale ADB** | Works today via the same serial contract, but the port changes on every re-pair | Device *discovery* is out of scope; pin the serial manually |
 | **Containerised emulators (DTU)** | Compose `digital-twin-universe` later if needed | Emulators run on the host for now |
+
+**No longer deferred:** AVD provisioning. The `create_avd` operation wraps `sdkmanager` + `avdmanager`, auto-detects the ABI from the host arch, refuses to clobber an existing AVD without `force`, refuses to accept SDK licences without `accept_licenses`, and verifies via `emulator -list-avds` rather than trusting an exit code.
