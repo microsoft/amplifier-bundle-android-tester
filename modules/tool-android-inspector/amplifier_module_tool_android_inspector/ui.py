@@ -35,6 +35,7 @@ __all__ = [
     "SelectorError",
     "UiDumpCollisionError",
     "UiDumpError",
+    "UiDumpTimeoutError",
     "UiInteractionError",
     "center_of",
     "dismiss_anr",
@@ -85,6 +86,15 @@ _ANR_WAIT_TEXT = "Wait"
 _ALREADY_REGISTERED_MARKER = "already registered"
 _UIAUTOMATION_SERVICE_MARKER = "UiAutomationService"
 
+# `uiautomator dump` prints this when the on-device UI never reaches an
+# idle/settled accessibility state (continuous redraw or animation) --
+# measured live, it does this WHILE STILL EXITING 0. Exit code alone is
+# never proof of success (same lesson as `adb.AM_START_ERROR_MARKERS`,
+# generalised to this second occurrence). "ERROR:" is intentionally broad
+# so any future variant of uiautomator's own error prefix is still caught,
+# not just this exact phrasing.
+_UIAUTOMATOR_IDLE_FAILURE_MARKERS = ("could not get idle state", "ERROR:")
+
 DEFAULT_DUMP_COLLISION_RETRIES = 3
 DEFAULT_DUMP_COLLISION_BACKOFF_S = 0.5
 
@@ -101,6 +111,40 @@ class UiDumpCollisionError(UiDumpError):
     stderr/stdout, and an explicit `note` of the honest limitation) so a
     caller sees exactly what was tried rather than a bare message -- same
     pattern as `adb.LaunchError`.
+    """
+
+    def __init__(self, message: str, **extra: Any) -> None:
+        super().__init__(message)
+        self.extra: dict[str, Any] = extra
+
+
+class UiDumpTimeoutError(UiDumpError):
+    """Raised when `uiautomator dump` reports it could not reach an idle
+    accessibility state (e.g. `ERROR: could not get idle state.`).
+
+    This is detected on message content, NEVER on exit code -- measured
+    against a real device, `uiautomator dump` prints this and still exits 0.
+    Before this check existed, that meant the exit-code-only success path
+    (`result.ok`) treated the failed dump as a success and went on to `cat`
+    whatever was sitting at `remote_path`: a STALE tree from a previous
+    successful dump, silently returned as if it were current. Every
+    coordinate computed from that stale tree missed its target.
+
+    This usually means the app under test is continuously redrawing or
+    animating (a mid-transition screen, a loading spinner, a live waveform)
+    and never settled long enough for uiautomator's accessibility snapshot
+    to complete -- it is not a transient glitch to paper over with a retry
+    loop here, which is why (unlike `UiDumpCollisionError`) this is raised
+    immediately rather than folded into the bounded collision-retry budget.
+
+    NEVER falls back to a cached/stale tree -- there is no code path from
+    this error back to returning UI content; `remote_path` is always
+    cleared before the dump attempt that raised this (see `dump_ui_xml`).
+
+    `.extra` carries `serial`, `duration_s` (the tell that distinguished
+    this failure in the field: ~11s vs ~2s for a healthy dump), and the raw
+    `stdout`/`stderr`, so the caller can decide whether to retry once the UI
+    has settled or in a different app state.
     """
 
     def __init__(self, message: str, **extra: Any) -> None:
@@ -346,6 +390,24 @@ def _looks_like_uiautomator_collision(stdout: str, stderr: str) -> bool:
     )
 
 
+def _looks_like_uiautomator_idle_failure(stdout: str, stderr: str) -> bool:
+    """True if `stdout`/`stderr` show uiautomator's own
+    `ERROR: could not get idle state.` failure -- checked on message content,
+    never on exit code alone. Measured against a real device: `uiautomator
+    dump` prints exactly this and STILL exits 0, which previously let the
+    bare `result.ok` check treat a failed dump as a success and go on to
+    `cat` a stale, previously-dumped file.
+
+    This is a DIFFERENT condition from `_looks_like_uiautomator_collision`
+    (a competing uiautomator instance) -- it means the on-device UI never
+    settled into an idle/static state (continuous redraw or animation), not
+    that another process is racing this one. It is checked before, and
+    independently of, the collision-retry loop, and is never folded into
+    that bounded retry budget."""
+    combined = f"{stdout}\n{stderr}"
+    return any(marker in combined for marker in _UIAUTOMATOR_IDLE_FAILURE_MARKERS)
+
+
 def dump_ui_xml(
     client: AdbClientLike,
     remote_path: str = DEFAULT_DUMP_REMOTE_PATH,
@@ -356,36 +418,100 @@ def dump_ui_xml(
 ) -> str:
     """Run `uiautomator dump` on-device and return the resulting XML text.
 
-    Serialised per-serial via an OS-level, cross-process file lock (see
-    `lock.dump_lock`) -- `tap`, `type_text`, `find`, and `wait_for` all dump
-    internally, and `wait_for`'s poll loop makes overlapping dumps against
-    the same device likely the moment two invocations of this tool run
-    concurrently against it. Two `uiautomator dump` processes racing on one
-    device collide with `IllegalStateException: UiAutomationService ...
-    already registered!` (adb shell typically reporting exit 137);
-    serialising this tool's own dumps eliminates that self-inflicted case.
+    **Never serves a stale tree.** `remote_path` is a fixed, reused location
+    (`DEFAULT_DUMP_REMOTE_PATH`) -- a previous successful dump's file sitting
+    there indefinitely is exactly what let a FAILED dump attempt serve stale
+    (and silently wrong) coordinates as if they were current. Once per call
+    (before the first `uiautomator dump` attempt), whatever is currently at
+    `remote_path` is deleted (`rm -f`, which is idempotent whether or not a
+    file is there). A retry within the SAME call never needs to repeat the
+    delete: a retried attempt only reaches the final `cat` by first
+    reporting `result.ok`, and `uiautomator dump` succeeding is precisely
+    what "wrote a fresh file at remote_path" means -- any failed attempt in
+    between (collision or otherwise) never gets its content read at all. If
+    the delete itself fails (`check_output` raises), that is a genuine
+    on-device problem (e.g. a read-only `/sdcard`) surfaced loudly rather
+    than proceeding unable to guarantee freshness.
 
-    On that specific collision signature (message content, not bare exit
-    code), retries up to `max_retries` times with a `retry_backoff_s` pause
-    between attempts. No other failure is retried -- a general retry here
-    would mask real failures (device offline, screen off, etc.) behind a
-    "just try again" that has nothing to do with this specific race.
+    **Exit code alone is never proof of success**, for two independent,
+    non-overlapping failure signatures, both detected on message content:
+
+    1. Collision -- `uiautomator dump` colliding with a competing
+       uiautomator instance on the same device raises
+       `IllegalStateException: UiAutomationService ... already registered!`
+       on-device, typically surfacing to adb shell as exit 137 (a NONZERO
+       exit). Serialised per-serial via an OS-level, cross-process file lock
+       (see `lock.dump_lock`) -- `tap`, `type_text`, `find`, and `wait_for`
+       all dump internally, and `wait_for`'s poll loop makes overlapping
+       dumps against the same device likely the moment two invocations of
+       this tool run concurrently against it; serialising this tool's own
+       dumps eliminates that self-inflicted case. On this specific
+       signature, retries up to `max_retries` times with a `retry_backoff_s`
+       pause between attempts.
+    2. Idle-state failure -- `uiautomator dump` reports
+       `ERROR: could not get idle state.` when the on-device UI never
+       settles (continuous redraw or animation), measured to happen WHILE
+       STILL EXITING 0. This is checked independently of `result.ok`, and
+       is NEVER folded into the collision-retry loop above (it is a
+       different condition with a different cause, and retrying it here
+       would just burn `max_retries` attempts against a screen that is not
+       going to settle on its own within a few hundred milliseconds).
+       Raises `UiDumpTimeoutError` immediately, with the observed duration
+       -- the field tell that distinguished this failure (~11s vs ~2s for a
+       healthy dump).
+
+    No OTHER failure is retried -- a general retry here would mask real
+    failures (device offline, screen off, etc.) behind a "just try again"
+    that has nothing to do with either signature above.
 
     Raises:
-        AdbError: the dump failed for a reason OTHER than the uiautomator
-            collision signature.
+        AdbError: the dump failed for a reason OTHER than the two
+            signatures above (or the pre-dump `rm -f` itself failed).
         UiDumpCollisionError: the collision signature was seen and retries
             were exhausted. `.extra` names the serial, attempts made, and
             the last observed stderr/stdout, and its message states the
             honest limit explicitly: this lock only serialises *this
             tool's* dumps -- a different process on the host dumping the
             same device concurrently is not covered and can still collide.
+        UiDumpTimeoutError: the idle-state failure signature was seen (on
+            message content, regardless of exit code). `.extra` names the
+            serial, the observed `duration_s`, and the raw stdout/stderr.
+            Never falls back to a cached tree.
         UiDumpError: the dump command succeeded but produced no output.
     """
     with dump_lock(client.serial, lock_dir):
+        # See docstring: make a stale file structurally impossible to serve
+        # by clearing remote_path once, before the first attempt of THIS
+        # call. Retries within this call never need to repeat it -- only a
+        # `result.ok` attempt reaches the final `cat`, and that means
+        # `uiautomator dump` itself just wrote a fresh file.
+        client.run("shell", "rm", "-f", remote_path, check_output=True)
+
         attempt = 0
         while True:
+            dump_start = time.monotonic()
             result = client.shell(f"uiautomator dump {remote_path}", check_output=False)
+            duration_s = time.monotonic() - dump_start
+
+            if _looks_like_uiautomator_idle_failure(result.stdout, result.stderr):
+                raise UiDumpTimeoutError(
+                    f"uiautomator dump on {client.serial!r} could not reach an "
+                    f"idle accessibility state after {duration_s:.2f}s (exit code "
+                    f"alone is not proof of success -- uiautomator reports this "
+                    "and still exits 0): "
+                    f"{(result.stdout or result.stderr).strip()!r}. This usually "
+                    "means the app under test is continuously redrawing or "
+                    "animating (a mid-transition screen, a loading spinner, a "
+                    "live waveform) and never settled long enough for the "
+                    "accessibility snapshot to complete. There is no cached tree "
+                    "to fall back to -- retry once the UI has settled into a "
+                    "static state, or in a different app state.",
+                    serial=client.serial,
+                    duration_s=duration_s,
+                    stdout=result.stdout,
+                    stderr=result.stderr,
+                )
+
             if result.ok:
                 break
             if not _looks_like_uiautomator_collision(result.stdout, result.stderr):
