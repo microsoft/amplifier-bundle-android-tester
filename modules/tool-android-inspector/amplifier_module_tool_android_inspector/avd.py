@@ -271,6 +271,21 @@ _NO_AARCH64_EMULATOR_REMEDIATION = (
     "build. This tool does not download or install anything automatically."
 )
 
+# Unlike the aarch64 case above, Google DOES ship an emulator build for
+# linux-x86_64 (and macOS, Windows) -- a missing binary on those hosts is a
+# one-command fix, not a "go find a community build" situation. Measured
+# live on a real x86_64 host (no emulator installed): this branch used to
+# just repeat the `detail` string back as "remediation" -- zero new
+# information for the far more common non-aarch64 case.
+_EMULATOR_BINARY_MISSING_REMEDIATION = (
+    'Install the emulator package: `sdkmanager --install "emulator"` (from '
+    "your Android SDK's cmdline-tools/*/bin, or see the 'cmdline_tools' check "
+    "below for where sdkmanager resolves). A system image is also required to "
+    "actually boot an AVD -- see the 'create_avd' operation, or install one "
+    'directly with `sdkmanager --install "system-images;android-<level>;'
+    '<tag>;<abi>"`.'
+)
+
 
 def check_host_platform() -> dict[str, Any]:
     """Informational: host OS/arch, and the ABI that follows from it."""
@@ -377,8 +392,21 @@ def check_emulator_binary(
     try:
         binary = resolve_emulator_binary(config)
     except EmulatorError as exc:
-        remediation = _NO_AARCH64_EMULATOR_REMEDIATION if is_aarch64_linux else str(exc)
-        return _check("emulator_binary", "fail", str(exc), remediation)
+        message = str(exc)
+        if is_aarch64_linux:
+            remediation = _NO_AARCH64_EMULATOR_REMEDIATION
+        elif "emulator binary not found at" in message:
+            # ANDROID_HOME resolved fine; only the emulator subdir/binary
+            # itself is missing -- a one-command fix on this (far more
+            # common) non-aarch64 case. Defect 5.
+            remediation = _EMULATOR_BINARY_MISSING_REMEDIATION
+        else:
+            # A different EmulatorError (ANDROID_HOME/ANDROID_SDK_ROOT
+            # unset, or a configured emulator_path that doesn't exist) --
+            # `message` itself already names that fix, unlike the
+            # "not found" case above.
+            remediation = message
+        return _check("emulator_binary", "fail", message, remediation)
 
     active_runner = runner or _default_subprocess_runner
     try:

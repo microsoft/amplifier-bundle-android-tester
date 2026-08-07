@@ -52,6 +52,7 @@ from .emulator import (
     stop_emulator as _stop_emulator_impl,
 )
 from .evidence import unique_evidence_path
+from .leases import DEFAULT_LEASE_DIR, AvdLeaseError
 from .ui import (
     SelectorError,
     UiDumpCollisionError,
@@ -142,28 +143,38 @@ class AndroidInspectorState:
             self._adb_path = resolve_adb_binary(self.config)
         return self._adb_path
 
+    @property
+    def lease_dir(self) -> Path:
+        """Host-global by default -- deliberately NOT derived from
+        `base_dir`/`work_dir`. Three sessions with three different
+        `work_dir`s must all see the SAME lease directory, or AVD-lease
+        cross-session collision detection (see leases.py) never triggers.
+        Overridable via config['lease_dir'] mainly for test isolation."""
+        override = self.config.get("lease_dir")
+        if override:
+            return Path(str(override)).expanduser()
+        return DEFAULT_LEASE_DIR
+
     def next_screenshot_index(self, serial: str) -> int:
         n = self._screenshot_counters.get(serial, 0) + 1
         self._screenshot_counters[serial] = n
         return n
 
 
-_state: AndroidInspectorState | None = None
-_state_config: dict[str, Any] = {}
-
-
-def get_state() -> AndroidInspectorState:
-    global _state
-    if _state is None:
-        cfg = _state_config
-        base_dir = Path(
-            str(cfg.get("work_dir", "~/.amplifier/android-sessions"))
-        ).expanduser()
-        base_dir.mkdir(parents=True, exist_ok=True)
-        run_dir = base_dir / "_run"
-        run_dir.mkdir(parents=True, exist_ok=True)
-        _state = AndroidInspectorState(config=cfg, base_dir=base_dir, run_dir=run_dir)
-    return _state
+def _build_state(config: dict[str, Any]) -> AndroidInspectorState:
+    """Pure construction, no module-level caching -- see
+    `AndroidInspectorTool._get_state()`. Defect 4: this used to be built
+    once into a MODULE-level singleton (`get_state()`), so a second
+    `mount()` call in the same process with a different `config` silently
+    reused the first mount's state. Every mounted tool now builds and owns
+    its own state."""
+    base_dir = Path(
+        str(config.get("work_dir", "~/.amplifier/android-sessions"))
+    ).expanduser()
+    base_dir.mkdir(parents=True, exist_ok=True)
+    run_dir = base_dir / "_run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    return AndroidInspectorState(config=config, base_dir=base_dir, run_dir=run_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -173,6 +184,20 @@ def get_state() -> AndroidInspectorState:
 
 class AndroidInspectorTool:
     """Amplifier Tool for driving and inspecting Android apps via adb + uiautomator."""
+
+    def __init__(self, config: dict[str, Any] | None = None) -> None:
+        # Defect 4: config lives on THIS instance, not a module global -- a
+        # second `mount()` in the same process (e.g. two Amplifier sessions
+        # sharing one interpreter, or a test constructing multiple tools)
+        # gets its own independent config and state, never silently
+        # inheriting or clobbering another instance's.
+        self._config: dict[str, Any] = config or {}
+        self._state: AndroidInspectorState | None = None
+
+    def _get_state(self) -> AndroidInspectorState:
+        if self._state is None:
+            self._state = _build_state(self._config)
+        return self._state
 
     @property
     def name(self) -> str:
@@ -190,8 +215,18 @@ class AndroidInspectorTool:
             "device, no explicit serial)\n"
             "- start_emulator: boot an AVD (avd, port), applying host workarounds, "
             "returns serial. Fast-fails immediately (no 60s timeout) if the AVD does "
-            "not exist, naming existing AVDs and the avdmanager remediation command\n"
-            "- stop_emulator: kill the emulator and reap its process\n"
+            "not exist, naming existing AVDs and the avdmanager remediation command. "
+            "Acquires an exclusive, cross-process lease on 'avd' first -- refuses "
+            "immediately if another live process already has it booted, naming the "
+            "owning pid/port/duration (each unrelated session should use its own AVD; "
+            "see create_avd). Without an explicit port, allocates one atomically "
+            "(skipping ports already attached or leased elsewhere); result carries "
+            "port_allocation_fallback if allocation was impossible\n"
+            "- stop_emulator: kill the emulator and reap its process. Refuses unless "
+            "a live AVD lease for that serial is owned by the calling session -- "
+            "names the owning pid rather than silently killing someone else's "
+            "emulator. 'force': true overrides, but the result always carries a "
+            "prominent 'warning' naming whose emulator was killed\n"
             "- doctor: full host readiness report (ANDROID_HOME, adb, emulator binary, "
             "KVM, ptrace_scope/gdb, AVDs, cmdline-tools) -- every check runs even if "
             "an earlier one fails; never errors, always returns a report\n"
@@ -272,7 +307,13 @@ class AndroidInspectorTool:
                         "given, start_emulator waits on the deterministic serial "
                         "'emulator-<port>' rather than 'any new serial', and "
                         "refuses to launch if that serial is already attached to "
-                        "another device/emulator."
+                        "another device/emulator. When OMITTED, a free port is "
+                        "allocated atomically (lowest free even port in range, "
+                        "skipping ports already attached in adb devices or "
+                        "recorded on another live AVD lease) -- only falls back "
+                        "to waiting for 'any new serial' if every port in range "
+                        "is taken, and the result names that fallback explicitly "
+                        "via 'port_allocation_fallback'."
                     ),
                 },
                 "name": {
@@ -321,7 +362,13 @@ class AndroidInspectorTool:
                     "description": (
                         "create_avd: overwrite an existing AVD of the same name. "
                         "Without this, create_avd errors rather than silently "
-                        "clobbering an existing AVD."
+                        "clobbering an existing AVD.\n"
+                        "stop_emulator: stop a serial even though its AVD lease is "
+                        "held by a DIFFERENT live process (or has no lease record "
+                        "at all). Without this, stop_emulator refuses and names "
+                        "the owning pid. When used cross-owner, the result always "
+                        "carries a prominent 'warning' field naming whose "
+                        "emulator was killed -- never silent."
                     ),
                 },
                 "apk_path": {
@@ -411,7 +458,7 @@ class AndroidInspectorTool:
         if not operation:
             return _err("Missing required parameter: operation")
 
-        state = get_state()
+        state = self._get_state()
 
         try:
             match operation:
@@ -464,6 +511,12 @@ class AndroidInspectorTool:
             # Carries structured fields (existing_avds, remediation_command,
             # missing_tools, ...) that must reach the caller intact -- same
             # pattern as LaunchError.
+            return _err(str(exc), **exc.extra)
+        except AvdLeaseError as exc:
+            # AVD-lease refusal (Defect 1: already leased by a live pid) or
+            # stop_emulator ownership refusal (Defect 3) -- carries
+            # owner_pid/avd/port/held_for_s so the caller sees exactly who
+            # holds it, not a bare "refused" message.
             return _err(str(exc), **exc.extra)
         except SelectorError as exc:
             return _err(str(exc), candidates=[n.to_dict() for n in exc.candidates])
@@ -549,12 +602,18 @@ class AndroidInspectorTool:
         # `port` (even, in adb's console-scan range, and not already
         # attached) is validated inside _start_emulator_impl, BEFORE the
         # emulator process is ever spawned -- see emulator.start_emulator.
+        # Cross-process AVD lease acquisition (Defect 1) and, when `port`
+        # is omitted, atomic port allocation (Defect 2) also happen inside
+        # _start_emulator_impl, against the HOST-GLOBAL `state.lease_dir`
+        # -- never derived from this session's `work_dir`, so unrelated
+        # sessions with different work_dirs still see each other's leases.
         result = _start_emulator_impl(
             avd=avd,
             adb_path=state.adb_path,
             config=state.config,
             run_dir=state.run_dir,
             port=port,
+            lease_dir=state.lease_dir,
         )
         state.registry[result["serial"]] = {
             "avd": avd,
@@ -577,7 +636,16 @@ class AndroidInspectorTool:
                 )
         meta = state.registry.get(serial, {})
         client = AdbClient(serial=serial, adb_path=state.adb_path)
-        result = _stop_emulator_impl(client, pid=meta.get("pid"))
+        # Ownership check (Defect 3) happens inside _stop_emulator_impl,
+        # against the recorded AVD lease for this serial -- not against
+        # `state.registry`, which is per-process/in-memory and would never
+        # even see an emulator a DIFFERENT session started.
+        result = _stop_emulator_impl(
+            client,
+            pid=meta.get("pid"),
+            force=bool(inp.get("force", False)),
+            lease_dir=state.lease_dir,
+        )
         state.registry.pop(serial, None)
         result["serial"] = serial
         return _ok(result)
@@ -893,13 +961,19 @@ async def mount(
             gdb_path: Explicit gdb binary override
             device_appear_timeout_s: How long to wait for a new serial after launch (default: 60.0)
             boot_timeout_s: How long to wait for sys.boot_completed (default: 240.0)
+            lease_dir: Override for the AVD-lease directory (default:
+                ~/.amplifier/android-sessions/leases -- deliberately NOT
+                derived from work_dir; see leases.py). Mainly for test
+                isolation -- production callers should not need this.
+
+    Each `mount()` call builds its OWN tool instance and config (Defect 4) --
+    a second `mount()` in the same process, e.g. with a different
+    `work_dir`, is fully independent and never silently shares or overwrites
+    the first mount's state.
 
     Returns:
         The mounted tool instance.
     """
-    global _state_config
-    _state_config = config or {}
-
-    tool = AndroidInspectorTool()
+    tool = AndroidInspectorTool(config=config or {})
     await coordinator.mount("tools", tool, name=tool.name)
     return tool

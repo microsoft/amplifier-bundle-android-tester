@@ -22,6 +22,8 @@ operation, and its result always carries a warning.
 | `amplifier_module_tool_android_inspector/emulator.py` | Host-workaround-aware emulator lifecycle (gdb/ptrace_scope, two-stage readiness) |
 | `amplifier_module_tool_android_inspector/avd.py` | AVD discovery/fast-fail, host readiness (`doctor`), provisioning (`create_avd`) |
 | `amplifier_module_tool_android_inspector/ui.py` | Dump parsing, selectors, the verified interaction protocol |
+| `amplifier_module_tool_android_inspector/lock.py` | Per-serial, cross-process `fcntl.flock` for serialising `uiautomator dump` |
+| `amplifier_module_tool_android_inspector/leases.py` | Host-global, cross-process AVD leases + atomic port allocation (multi-session safety) |
 
 ### Operations
 
@@ -112,6 +114,24 @@ silent first-match.
    emulator used to leave the tool waiting the full 240s boot timeout
    before reporting a bare "adb timed out" symptom instead of the cause).
    Then `wait-for-device`, poll `sys.boot_completed`, `input keyevent 82`.
+
+   **Multi-session safety (AVD leases -- see "Concurrent sessions on one
+   host" below).** Before any of the above, `start_emulator` acquires an
+   exclusive, cross-process lease on `avd`. An AVD's QCOW2 disk state
+   cannot be opened by two `emulator` processes at once -- measured live,
+   three concurrent `start_emulator` calls for the same AVD (no port), from
+   three unrelated Amplifier sessions on one host, **all three failed**
+   almost immediately. The lease turns that into an immediate, loud
+   refusal naming the owning pid, its port, and how long it's been held,
+   instead of a silent, confusing double-boot failure. A lease held by a
+   process that has since died is stale and reclaimed automatically. When
+   `port` is omitted, a free port is now allocated atomically (as part of
+   the same lease acquisition) from the lowest free even port in
+   5554-5682, skipping ports already attached in `adb devices` and ports
+   recorded on any other currently-live lease -- closing the previous "two
+   sessions each adopt whichever serial appears first" race. Falls back to
+   waiting for "any new serial" only if every port in range is taken, and
+   the result names that fallback via `port_allocation_fallback`.
 7. **`list_devices`** treats ambiguity (no serial configured, >1 ready
    device) as an error listing them, demanding an explicit serial. Offline
    and unauthorized devices are reported distinctly, never silently treated
@@ -156,6 +176,70 @@ silent first-match.
     `emulator -list-avds` afterward (falling back to an `.ini`-file disk
     check if the emulator binary itself doesn't resolve). See
     `avd.py::create_avd`.
+14. **`stop_emulator` refuses unless a live AVD lease for the target serial
+    is owned by the calling session.** Ownership is resolved by serial via
+    `leases.find_lease_by_serial` -- not via any in-memory registry, since
+    the whole point is protecting against a DIFFERENT process (which never
+    shares this one's memory) calling `stop_emulator` on a serial it never
+    started. If a different, currently-live process holds the lease, or no
+    lease record exists at all (predates lease tracking, started outside
+    this tool, or a physical device), `stop_emulator` refuses and names the
+    owning pid (when known) -- `force: true` overrides, but the result
+    always carries a prominent `warning` field naming whose emulator was
+    just killed. See `emulator.py::stop_emulator` and "Concurrent sessions
+    on one host" below.
+15. **`mount()` config is per-instance, not a module-level global.** A
+    second `mount()` call in the same process (e.g. two Amplifier sessions
+    sharing one interpreter) used to silently reuse the FIRST mount's
+    config and state -- measured live: three `mount()` calls with
+    `work_dir` `/tmp/at-c1`, `/tmp/at-c2`, `/tmp/at-c3` all wrote to
+    `/tmp/at-c1`; `/tmp/at-c2` and `/tmp/at-c3` were never created. Each
+    `AndroidInspectorTool` instance now owns its own config and lazily-built
+    state (`AndroidInspectorTool.__init__(config=...)` /
+    `AndroidInspectorTool._get_state()`).
+
+### Concurrent sessions on one host
+
+Three unrelated projects, three Amplifier sessions, three separate OS
+processes, **none aware of the others**, all on one machine, all wanting an
+Android emulator at the same time -- without care, this corrupts silently
+or fails mysteriously (see `leases.py`'s module docstring for the full
+rationale). Three protections apply, in order of where they trigger:
+
+1. **AVD lease (`start_emulator`).** Booting an AVD acquires an exclusive,
+   cross-process lease on that AVD name, held under
+   `~/.amplifier/android-sessions/leases/<avd>.lease` -- a **fixed,
+   host-global path**, deliberately NOT derived from any session's
+   `work_dir` (three sessions with three different `work_dir`s must all
+   see the same lease directory, or cross-session detection never
+   triggers). If another live process already holds it, `start_emulator`
+   fails immediately, naming the owning pid, its port, and how long it's
+   been held. A lease recorded by a since-dead pid is stale and reclaimed
+   automatically. **The honest fix for two unrelated projects is that they
+   should each have their own AVD** -- the lease does not make sharing
+   safe, it makes the collision *discoverable and loud* instead of
+   silently corrupting both instances' disk state; refusal messages point
+   at `create_avd` to provision a distinct one.
+2. **Atomic port allocation (`start_emulator`, no explicit `port`).** Two
+   sessions starting at the same instant, with no port pinned, used to each
+   adopt whichever adb serial appeared first -- a coin flip over whose
+   emulator was whose. A free port is now chosen and claimed atomically
+   (as part of the SAME lease acquisition, under a dedicated host-global
+   allocation lock), skipping ports already attached in `adb devices` and
+   ports recorded on any other currently-live lease. Only if every port in
+   the 5554-5682 range is taken does this fall back to the old
+   non-deterministic "any new serial" wait -- and the result says so via
+   `port_allocation_fallback`.
+3. **Ownership-gated `stop_emulator`.** Without a lease, `stop_emulator`
+   would kill whatever serial it's handed with zero ownership check --
+   session A could terminate session B's emulator (this happened by hand
+   during this project's own development and caused a real cross-project
+   incident: a sibling harness then adopted the wrong device and drove the
+   wrong app). `stop_emulator` now refuses unless the target serial's live
+   lease names the calling process as owner, naming the actual owning pid
+   otherwise. `force: true` is the explicit escape hatch -- it works, but
+   the result always carries a prominent `warning` naming whose emulator
+   was killed. Never silent either way.
 
 ### Configuration (via `mount()` config, i.e. `behaviors/android-tester.yaml`)
 
@@ -172,6 +256,7 @@ silent first-match.
 | `device_appear_timeout_s` | `60.0` | Wait for a new serial after launch |
 | `boot_timeout_s` | `240.0` | Wait for `sys.boot_completed` |
 | `avd_home` | `$ANDROID_AVD_HOME`, else `$ANDROID_SDK_HOME/.android/avd`, else `~/.android/avd` | Explicit AVD home override (`start_emulator`, `doctor`, `create_avd`) |
+| `lease_dir` | `~/.amplifier/android-sessions/leases` (host-global -- NOT derived from `work_dir`) | Explicit AVD-lease directory override. Mainly for test isolation; production callers should not need this -- see "Concurrent sessions on one host" above |
 
 ### Testing
 
@@ -193,9 +278,16 @@ python -m pytest tests/ -v
   client.
 - `tests/test_emulator.py` — ptrace_scope detection, gdb launch script
   content, process-launch argv construction (direct vs. gdb-wrapped), new
-  serial discovery, two-stage boot readiness.
+  serial discovery, two-stage boot readiness, AVD-lease acquisition/refusal/
+  release around `start_emulator`, port auto-allocation, and
+  `stop_emulator` ownership refusal/`force` override.
+- `tests/test_leases.py` — the AVD-lease/port-allocation module itself:
+  acquire/refuse/stale-reclaim (including a dead-owner-pid case via a real
+  exited subprocess), concurrent-racer serialisation, port allocation
+  skipping in-use/leased ports and reporting exhaustion, release ownership
+  checks, serial reverse-lookup.
 - `tests/test_tool.py` — dispatch surface sanity (schema, missing/unknown
-  operation handling).
+  operation handling), per-instance `mount()`/config isolation.
 
 ### Explicitly deferred
 

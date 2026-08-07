@@ -7,10 +7,8 @@ technique as `test_logcat_tool.py` / `test_screenshot.py`.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 from pathlib import Path
 
-import amplifier_module_tool_android_inspector as pkg
 import pytest
 from amplifier_module_tool_android_inspector import (
     AndroidInspectorState,
@@ -26,17 +24,6 @@ class _FakeCompleted:
         self.returncode = returncode
         self.stdout = stdout
         self.stderr = stderr
-
-
-@pytest.fixture(autouse=True)
-def _reset_module_state() -> Iterator[None]:
-    """`get_state()` caches a module-level singleton -- reset it around each
-    test so one test's config/state can't leak into the next."""
-    pkg._state = None
-    pkg._state_config = {}
-    yield
-    pkg._state = None
-    pkg._state_config = {}
 
 
 async def test_execute_ui_dump_surfaces_collision_error_with_structured_extra(
@@ -62,16 +49,18 @@ async def test_execute_ui_dump_surfaces_collision_error_with_structured_extra(
     )
 
     # Bypass resolve_adb_binary (which requires the path to exist on disk)
-    # by seeding the cached singleton state directly with `_adb_path`
-    # pre-resolved -- same technique as test_screenshot.py's `_fresh_state`.
+    # by seeding the tool's own per-instance state directly with
+    # `_adb_path` pre-resolved -- same technique as test_screenshot.py's
+    # `_fresh_state`. Defect 4: state is per-instance now, so this only
+    # touches THIS tool object, not a module-level singleton.
     base_dir = tmp_path / "sessions"
     run_dir = base_dir / "_run"
     run_dir.mkdir(parents=True, exist_ok=True)
-    pkg._state = AndroidInspectorState(
-        config={}, base_dir=base_dir, run_dir=run_dir, _adb_path=ADB_PATH
-    )
 
     tool = AndroidInspectorTool()
+    tool._state = AndroidInspectorState(
+        config={}, base_dir=base_dir, run_dir=run_dir, _adb_path=ADB_PATH
+    )
     result = await tool.execute({"operation": "ui_dump", "serial": SERIAL})
 
     assert result["success"] is False
