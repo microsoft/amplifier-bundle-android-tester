@@ -243,9 +243,9 @@ def test_start_emulator_fast_fail_spawns_nothing(tmp_path, monkeypatch) -> None:
         lambda config: (_ for _ in ()).throw(EmulatorError("no emulator")),
     )
 
-    tool = pkg.AndroidInspectorTool()
-    state = pkg.get_state()
-    state.config = {"avd_home": str(tmp_path)}
+    # Defect 4: config is per-instance now -- construct the tool with its
+    # config directly rather than mutating a module-level singleton state.
+    tool = pkg.AndroidInspectorTool(config={"avd_home": str(tmp_path)})
 
     import asyncio
 
@@ -293,6 +293,7 @@ def test_start_emulator_rejects_odd_port_without_launching(
             config={},
             run_dir=tmp_path / "run",
             port=5555,
+            lease_dir=tmp_path / "leases",
         )
 
 
@@ -320,6 +321,7 @@ def test_start_emulator_rejects_out_of_range_port_without_launching(
             config={},
             run_dir=tmp_path / "run",
             port=5000,
+            lease_dir=tmp_path / "leases",
         )
 
 
@@ -352,6 +354,7 @@ def test_start_emulator_refuses_when_expected_serial_already_attached(
             config={},
             run_dir=tmp_path / "run",
             port=5570,
+            lease_dir=tmp_path / "leases",
         )
 
     assert launched["called"] is False
@@ -412,6 +415,7 @@ def test_start_emulator_threads_port_through_and_waits_on_exact_serial(
         config={},
         run_dir=tmp_path / "run",
         port=5570,
+        lease_dir=tmp_path / "leases",
     )
 
     assert captured["port"] == 5570
@@ -597,6 +601,64 @@ def test_check_emulator_binary_fail_missing_on_other_host(tmp_path) -> None:
     )
     assert result["status"] == "fail"
     assert "Google ships no linux-aarch64 emulator" not in result["remediation"]
+
+
+def test_check_emulator_binary_fail_missing_on_x86_64_linux_names_sdkmanager_install(
+    tmp_path,
+) -> None:
+    """Defect 5, the exact measured scenario: a real x86_64 Linux host
+    (e.g. 'alienware-r13') with ANDROID_HOME resolving fine but no emulator
+    installed under it used to get a remediation that just repeated the
+    detail string verbatim -- zero new information. Google DOES ship a
+    linux-x86_64 emulator, so the fix is a single sdkmanager command.
+    `android_home` (not `emulator_path`) reproduces the exact
+    `resolve_emulator_binary` code path that produced the measured
+    "emulator binary not found at ..." message."""
+    result = check_emulator_binary(
+        {"android_home": str(tmp_path)},
+        system="Linux",
+        abi="x86_64",
+    )
+    assert result["status"] == "fail"
+    assert "emulator binary not found" in result["detail"]
+    assert result["remediation"] != result["detail"]
+    assert "sdkmanager" in result["remediation"]
+    assert "--install" in result["remediation"]
+    assert '"emulator"' in result["remediation"]
+    assert "system image" in result["remediation"].lower()
+    assert "Google ships no linux-aarch64 emulator" not in result["remediation"]
+
+
+def test_check_emulator_binary_fail_missing_on_aarch64_linux_uses_sdkmanager_too(
+    tmp_path,
+) -> None:
+    """Same 'ANDROID_HOME resolves, emulator subdir missing' scenario as
+    above, but on aarch64 -- must NOT get the sdkmanager remediation (no
+    linux-aarch64 emulator exists to install); the community-build pointer
+    is still correct and takes priority."""
+    result = check_emulator_binary(
+        {"android_home": str(tmp_path)},
+        system="Linux",
+        abi="arm64-v8a",
+    )
+    assert result["status"] == "fail"
+    assert "Google ships no linux-aarch64 emulator" in result["remediation"]
+    assert "sdkmanager" not in result["remediation"]
+
+
+def test_check_emulator_binary_aarch64_message_unchanged_by_defect_5_fix(
+    tmp_path,
+) -> None:
+    """The aarch64 case must be completely untouched by the Defect 5 fix."""
+    result = check_emulator_binary(
+        {"emulator_path": str(tmp_path / "no-such-emulator")},
+        system="Linux",
+        abi="arm64-v8a",
+    )
+    assert result["status"] == "fail"
+    assert "Google ships no linux-aarch64 emulator" in result["remediation"]
+    assert "docs/TROUBLESHOOTING.md" in result["remediation"]
+    assert "sdkmanager" not in result["remediation"]
 
 
 def test_check_emulator_binary_exec_format_error(tmp_path) -> None:

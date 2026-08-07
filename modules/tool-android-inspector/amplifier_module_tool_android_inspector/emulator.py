@@ -34,6 +34,16 @@ from typing import Any
 
 from .adb import AdbClient, AdbClientLike, AdbError, list_raw_devices
 from .evidence import unique_evidence_path
+from .leases import (
+    AvdLeaseError,
+    acquire_avd_lease,
+    describe_lease,
+    find_lease_by_serial,
+    is_pid_alive,
+    parse_port_from_serial,
+    record_lease_serial,
+    release_avd_lease,
+)
 
 __all__ = [
     "DEFAULT_BOOT_TIMEOUT_S",
@@ -546,6 +556,7 @@ def start_emulator(
     config: dict[str, Any],
     run_dir: Path,
     port: int | None = None,
+    lease_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Boot `avd`, applying host workarounds, and return once ready.
 
@@ -556,6 +567,17 @@ def start_emulator(
     (avd.py imports from here; this module does not import from avd.py) and
     means a missing AVD never reaches the ~60s device-appear timeout below.
 
+    Cross-process AVD lease (see leases.py): before anything is launched,
+    this acquires an exclusive lease on `avd` -- an AVD's QCOW2 disk state
+    cannot be opened by two emulator processes at once, so a second
+    `start_emulator` call for the same AVD, from a different (unaware)
+    session, fails immediately and loudly, naming the owning pid, its port,
+    and how long it's been held, rather than both instances silently
+    corrupting each other. A lease held by a since-dead pid is stale and is
+    reclaimed automatically. The lease is released again (so a retry can
+    succeed) if ANYTHING below fails -- it is only left held once this
+    function returns successfully.
+
     `port`, when given, pins the emulator's console port (`-port <port>`;
     adb derives the adb port as `port + 1`). It is validated (even, within
     adb's scan range -- see `validate_emulator_port`) BEFORE anything is
@@ -565,6 +587,16 @@ def start_emulator(
     to proceed rather than risk adopting someone else's already-running
     instance, and waits on that exact serial afterward instead of the
     "any new serial" heuristic used when no port is given.
+
+    When `port` is omitted, a free port is allocated atomically (as part of
+    the same lease acquisition) from the lowest free even port in
+    `PORT_RANGE_MIN`-`PORT_RANGE_MAX`, skipping ports already attached in
+    `adb devices` and ports recorded on any OTHER currently-live lease --
+    this closes the "two sessions each adopt whichever serial appears
+    first" race. Only if every port in range is already taken does this
+    fall back to the old "any new serial" heuristic; the result's
+    `port_allocation_fallback` says so explicitly rather than silently
+    reverting to non-deterministic behaviour.
     """
     if not avd:
         raise EmulatorError("start_emulator requires 'avd'.")
@@ -573,63 +605,101 @@ def start_emulator(
     before = snapshot_serials(adb_path)
     scope = ptrace_scope()
 
-    expected_serial: str | None = None
-    if port is not None:
-        validate_emulator_port(port)
-        expected_serial = f"emulator-{port}"
-        if expected_serial in before:
-            raise EmulatorError(
-                f"Refusing to launch on port {port}: serial {expected_serial!r} "
-                "is already attached to another device/emulator. Adopting it "
-                "would mean operating on an instance this call did not start "
-                "-- choose a different port, or stop whatever is already "
-                "using this one. See docs/TROUBLESHOOTING.md, 'Wrong device "
-                "targeted'."
-            )
+    caller_supplied_port = port
+    attached_ports = {p for s in before if (p := parse_port_from_serial(s)) is not None}
+    # If this raises AvdLeaseError, nothing has been acquired -- nothing to
+    # release. Let it propagate as-is (owner pid/port/duration intact).
+    #
+    # `device_liveness_probe` lets acquire_avd_lease distinguish Orphaned
+    # (owner pid dead, emulator still running) from Stale (owner pid dead,
+    # emulator also gone) -- see leases.py module docstring. `before` is
+    # the single point-in-time `adb devices` snapshot already taken above
+    # (same one `attached_ports` derives from), so this costs no extra adb
+    # call and stays consistent with the attached-ports check right below.
+    lease = acquire_avd_lease(
+        avd,
+        port=caller_supplied_port,
+        lease_dir=lease_dir,
+        allocate_port_range=(PORT_RANGE_MIN, PORT_RANGE_MAX)
+        if caller_supplied_port is None
+        else None,
+        attached_ports=frozenset(attached_ports),
+        device_liveness_probe=lambda serial: serial in before,
+    )
 
-    launched = launch_emulator_process(avd, emulator_binary, config, run_dir, port=port)
+    port_allocation_fallback = (
+        caller_supplied_port is None and lease.port_allocation_exhausted
+    )
+    port = caller_supplied_port if caller_supplied_port is not None else lease.port
 
     try:
-        if expected_serial is not None:
-            serial = wait_for_specific_serial(
-                expected_serial,
-                list_serials_fn=lambda: snapshot_serials(adb_path),
-                timeout_s=float(
-                    config.get(
-                        "device_appear_timeout_s", DEFAULT_DEVICE_APPEAR_TIMEOUT_S
-                    )
-                ),
-                process=launched.process,
-                log_path=launched.log_path,
-            )
-        else:
-            serial = wait_for_new_serial(
-                before,
-                list_serials_fn=lambda: snapshot_serials(adb_path),
-                timeout_s=float(
-                    config.get(
-                        "device_appear_timeout_s", DEFAULT_DEVICE_APPEAR_TIMEOUT_S
-                    )
-                ),
-                process=launched.process,
-                log_path=launched.log_path,
-            )
-        client = AdbClient(serial=serial, adb_path=adb_path)
-        wait_boot_completed(
-            client,
-            timeout_s=float(config.get("boot_timeout_s", DEFAULT_BOOT_TIMEOUT_S)),
-            process=launched.process,
-            log_path=launched.log_path,
+        expected_serial: str | None = None
+        if port is not None:
+            validate_emulator_port(port)
+            expected_serial = f"emulator-{port}"
+            if expected_serial in before:
+                raise EmulatorError(
+                    f"Refusing to launch on port {port}: serial {expected_serial!r} "
+                    "is already attached to another device/emulator. Adopting it "
+                    "would mean operating on an instance this call did not start "
+                    "-- choose a different port, or stop whatever is already "
+                    "using this one. See docs/TROUBLESHOOTING.md, 'Wrong device "
+                    "targeted'."
+                )
+
+        launched = launch_emulator_process(
+            avd, emulator_binary, config, run_dir, port=port
         )
-        dismiss_keyguard(client)
-    except EmulatorError as exc:
-        # Process-death errors already name `launched.log_path` themselves
-        # (see `_process_death_error`) -- only append the pointer for errors
-        # that don't (plain timeouts), to avoid a redundant double mention.
-        message = str(exc)
-        if str(launched.log_path) not in message:
-            message = f"{message} See emulator log: {launched.log_path}"
-        raise EmulatorError(message) from exc
+
+        try:
+            if expected_serial is not None:
+                serial = wait_for_specific_serial(
+                    expected_serial,
+                    list_serials_fn=lambda: snapshot_serials(adb_path),
+                    timeout_s=float(
+                        config.get(
+                            "device_appear_timeout_s", DEFAULT_DEVICE_APPEAR_TIMEOUT_S
+                        )
+                    ),
+                    process=launched.process,
+                    log_path=launched.log_path,
+                )
+            else:
+                serial = wait_for_new_serial(
+                    before,
+                    list_serials_fn=lambda: snapshot_serials(adb_path),
+                    timeout_s=float(
+                        config.get(
+                            "device_appear_timeout_s", DEFAULT_DEVICE_APPEAR_TIMEOUT_S
+                        )
+                    ),
+                    process=launched.process,
+                    log_path=launched.log_path,
+                )
+            client = AdbClient(serial=serial, adb_path=adb_path)
+            wait_boot_completed(
+                client,
+                timeout_s=float(config.get("boot_timeout_s", DEFAULT_BOOT_TIMEOUT_S)),
+                process=launched.process,
+                log_path=launched.log_path,
+            )
+            dismiss_keyguard(client)
+        except EmulatorError as exc:
+            # Process-death errors already name `launched.log_path` themselves
+            # (see `_process_death_error`) -- only append the pointer for errors
+            # that don't (plain timeouts), to avoid a redundant double mention.
+            message = str(exc)
+            if str(launched.log_path) not in message:
+                message = f"{message} See emulator log: {launched.log_path}"
+            raise EmulatorError(message) from exc
+
+        record_lease_serial(avd, serial, lease_dir=lease_dir)
+    except Exception:
+        # Anything failed after the lease was acquired -- nothing is
+        # actually running, so release it rather than leaving the AVD
+        # falsely "leased" until this (still-alive) process exits.
+        release_avd_lease(avd, expected_pid=os.getpid(), lease_dir=lease_dir)
+        raise
 
     return {
         "serial": serial,
@@ -638,6 +708,7 @@ def start_emulator(
         "port": port,
         "log_path": str(launched.log_path),
         "used_gdb_workaround": scope is not None and scope != 0,
+        "port_allocation_fallback": port_allocation_fallback,
     }
 
 
@@ -649,7 +720,154 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
-def stop_emulator(client: AdbClientLike, *, pid: int | None = None) -> dict[str, Any]:
+def _default_device_liveness_probe(client: AdbClientLike) -> Callable[[], bool]:
+    """Build the default liveness probe for `stop_emulator`: `adb -s
+    <serial> get-state`. Returns `True` iff the device still answers at
+    all (any state -- 'device', 'offline', ...) -- exit code alone (a
+    nonzero "device not found") is what actually distinguishes a gone
+    emulator from a merely-not-yet-ready one. No new adb_path parameter is
+    needed: `client` is already scoped to the exact serial being stopped.
+    """
+
+    def probe() -> bool:
+        return client.run("get-state", check_output=False).ok
+
+    return probe
+
+
+def stop_emulator(
+    client: AdbClientLike,
+    *,
+    pid: int | None = None,
+    force: bool = False,
+    lease_dir: Path | None = None,
+    device_liveness_probe: Callable[[], bool] | None = None,
+) -> dict[str, Any]:
+    """Stop the emulator at `client.serial`, refusing unless a live lease
+    for that serial is owned by the calling process (see leases.py).
+
+    Ownership is resolved by serial -- not by any in-memory registry --
+    because the whole point is protecting against a DIFFERENT process
+    (which never shares this one's in-memory state) calling `stop_emulator`
+    on a serial it never started. Four outcomes:
+
+    1. The lease is ours (or none exists but the emulator was started by
+       THIS pid some other way), OR the lease's owner pid is dead AND the
+       emulator itself is also confirmed gone (Stale) -- proceeds normally,
+       no force required. Killing something already gone is harmless.
+    2. A DIFFERENT, currently live process holds the lease (Owned) --
+       refuses with `AvdLeaseError` naming the owning pid, unless
+       `force=True`, in which case it proceeds but the result carries a
+       prominent `warning` naming whose emulator was just killed. Never
+       silent either way.
+    3. The lease's owner pid is dead, but the emulator itself is still
+       running (Orphaned -- measured live: a session ends normally, its
+       emulator keeps running, and a dead owner pid alone must never be
+       read as "safe to kill"). Refuses just as loudly as case 2, naming
+       the dead owner pid explicitly so `force=True` is an obviously safe,
+       informed call -- there is no live session to disturb, only an
+       unattended emulator.
+    4. No lease record exists at all (predates lease tracking, started
+       outside this tool, or physical device) -- ownership cannot be
+       verified in EITHER direction, so this is treated the same as case 2:
+       refuses unless `force=True` (with the same warning-on-force
+       behaviour). This is the stricter, safer reading -- "no record" is
+       not proof of "safe to kill".
+
+    `device_liveness_probe`, if given, is a zero-arg callable returning
+    `True` iff `client.serial` is currently alive -- used ONLY to
+    distinguish case 1 (Stale) from case 3 (Orphaned) when the owner pid is
+    dead. Defaults to `adb -s <serial> get-state` via `client` itself (see
+    `_default_device_liveness_probe`) -- no extra adb_path plumbing needed.
+
+    Once the kill actually proceeds (case 1, or 2/3 with `force=True`), the
+    lease (if any) is released so the AVD becomes available again.
+    """
+    serial = client.serial
+    lease = find_lease_by_serial(serial, lease_dir=lease_dir)
+    our_pid = os.getpid()
+    probe = device_liveness_probe or _default_device_liveness_probe(client)
+
+    live_other_owner = False
+    orphaned = False
+    if lease is not None and lease.pid != our_pid:
+        if is_pid_alive(lease.pid):
+            live_other_owner = True
+        else:
+            # Owner pid is dead -- but an emulator commonly outlives the
+            # session that started it (see leases.py module docstring).
+            # Only a positive "the device is gone too" confirms Stale;
+            # anything else (device still alive) is Orphaned, not free.
+            orphaned = probe()
+    unverifiable = lease is None
+
+    warning: str | None = None
+    if live_other_owner or orphaned or unverifiable:
+        if not force:
+            if live_other_owner:
+                assert lease is not None  # narrows for the type checker
+                raise AvdLeaseError(
+                    f"Refusing to stop {serial!r}: it is leased by a DIFFERENT "
+                    f"live process ({describe_lease(lease)}, AVD {lease.avd!r}). "
+                    "Killing it would terminate someone else's emulator out from "
+                    "under them. Pass 'force': true to override (the result will "
+                    "carry a prominent warning naming whose emulator was killed), "
+                    "or leave it alone -- each session should have its own AVD; "
+                    "see 'create_avd'.",
+                    serial=serial,
+                    owner_pid=lease.pid,
+                    avd=lease.avd,
+                    port=lease.port,
+                    held_for_s=lease.held_for_s(),
+                    suggested_operation="create_avd",
+                )
+            if orphaned:
+                assert lease is not None
+                raise AvdLeaseError(
+                    f"Refusing to stop {serial!r}: it is orphaned -- its owning "
+                    f"session (pid {lease.pid}) is gone, but the emulator itself "
+                    f"is still running ({describe_lease(lease)}, AVD "
+                    f"{lease.avd!r}). An emulator commonly outlives the session "
+                    "that started it, so a dead owner process does not by "
+                    "itself mean this is safe to kill. Pass 'force': true if "
+                    "you are sure -- there is no live owner session to "
+                    "disturb, only an unattended emulator.",
+                    serial=serial,
+                    owner_pid=lease.pid,
+                    avd=lease.avd,
+                    port=lease.port,
+                    held_for_s=lease.held_for_s(),
+                    orphaned=True,
+                    suggested_operation="create_avd",
+                )
+            raise AvdLeaseError(
+                f"Refusing to stop {serial!r}: no lease record names this (or "
+                "any other live) process as the owner -- it may predate this "
+                "tool's lease tracking, belong to a device started outside it, "
+                "or its recorded owner may already be gone. Cannot verify this "
+                "is safe. Pass 'force': true if you are sure.",
+                serial=serial,
+            )
+        if live_other_owner:
+            assert lease is not None
+            warning = (
+                f"FORCED stop of {serial!r}: leased by a DIFFERENT live process "
+                f"({describe_lease(lease)}, AVD {lease.avd!r}) -- NOT this "
+                "session. That emulator has been killed out from under its owner."
+            )
+        elif orphaned:
+            assert lease is not None
+            warning = (
+                f"FORCED stop of {serial!r}: orphaned -- its owning session "
+                f"(pid {lease.pid}) was already gone, AVD {lease.avd!r}. No "
+                "live owner session was disturbed."
+            )
+        else:
+            warning = (
+                f"FORCED stop of {serial!r}: no lease record found -- ownership "
+                "could not be verified in either direction."
+            )
+
     result = client.emu_kill()
 
     reaped = False
@@ -669,4 +887,10 @@ def stop_emulator(client: AdbClientLike, *, pid: int | None = None) -> dict[str,
             except OSError:
                 pass
 
-    return {"emu_kill_ok": result.ok, "process_reaped": reaped}
+    if lease is not None:
+        release_avd_lease(lease.avd, lease_dir=lease_dir)
+
+    out: dict[str, Any] = {"emu_kill_ok": result.ok, "process_reaped": reaped}
+    if warning is not None:
+        out["warning"] = warning
+    return out
