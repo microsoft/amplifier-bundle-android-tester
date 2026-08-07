@@ -15,6 +15,7 @@ from amplifier_module_tool_android_inspector.ui import (
     SelectorError,
     UiDumpCollisionError,
     UiDumpError,
+    UiDumpTimeoutError,
     UiInteractionError,
     center_of,
     dismiss_anr,
@@ -494,3 +495,230 @@ def test_dump_ui_xml_serialises_two_concurrent_dumps_for_same_serial(tmp_path) -
         t.join(timeout=5)
 
     assert entered == ["enter", "exit", "enter", "exit"]
+
+
+# ---------------------------------------------------------------------------
+# dump_ui_xml -- CRITICAL defect: a FAILED dump must never serve a stale
+# tree. Verified against a fake that models the actual on-device remote-file
+# lifecycle (rm clears it, a dump outcome only writes fresh content when it
+# is a genuine uiautomator success), not merely a canned content queue --
+# so these tests fail if the fix regresses to "cat whatever is there".
+# ---------------------------------------------------------------------------
+
+_STALE_XML = SAMPLE_DUMP_XML.replace(
+    'text="http://old-server:9000"', 'text="STALE-FROM-A-PREVIOUS-DUMP"'
+)
+
+_IDLE_FAILURE_RESULT = AdbCommandResult(
+    args=[], returncode=0, stdout="ERROR: could not get idle state.\n", stderr=""
+)
+
+
+class _RemoteFileFakeAdbClient(FakeAdbClient):
+    """Models the REAL on-device remote-file lifecycle at `remote_path`,
+    instead of the base FakeAdbClient's canned `exec-out cat` queue (which
+    returns content unconditionally, regardless of whether a dump actually
+    succeeded -- too permissive to prove the staleness fix).
+
+    - `rm -f <remote_path>` (via `.run()`) clears `remote_file_content`.
+    - `uiautomator dump` (via `.shell()`) only sets `remote_file_content`
+      to `fresh_dump_xml` when the canned outcome is a genuine success:
+      `ok` AND none of the idle-failure markers present -- exactly
+      uiautomator's own real-world contract (a collision or an idle
+      failure never writes a fresh file).
+    - `exec-out cat` (via `.run()`) reflects `remote_file_content` exactly:
+      empty/error if absent, the real content if present. No canned queue.
+    """
+
+    def __init__(
+        self,
+        *,
+        initial_remote_content: str | None = None,
+        dump_outcomes: list[AdbCommandResult] | None = None,
+        fresh_dump_xml: str = SAMPLE_DUMP_XML,
+        **kwargs: object,
+    ) -> None:
+        super().__init__(**kwargs)  # type: ignore[arg-type]
+        self.remote_file_content = initial_remote_content
+        self._dump_outcomes = list(dump_outcomes or [])
+        self.fresh_dump_xml = fresh_dump_xml
+
+    def shell(
+        self, command, *, check_output: bool = False, timeout: float | None = None
+    ) -> AdbCommandResult:
+        text = command if isinstance(command, str) else " ".join(command)
+        args = ("shell", text)
+        self.calls.append(args)
+        if not text.startswith("uiautomator dump"):
+            return AdbCommandResult(args=list(args), returncode=0, stdout="", stderr="")
+
+        outcome = (
+            self._dump_outcomes.pop(0)
+            if self._dump_outcomes
+            else AdbCommandResult(args=list(args), returncode=0, stdout="", stderr="")
+        )
+        combined = f"{outcome.stdout}\n{outcome.stderr}"
+        genuinely_succeeded = (
+            outcome.ok
+            and "could not get idle state" not in combined
+            and "ERROR:" not in combined
+        )
+        if genuinely_succeeded:
+            self.remote_file_content = self.fresh_dump_xml
+        return outcome
+
+    def run(
+        self, *args: str, timeout: float | None = None, check_output: bool = False
+    ) -> AdbCommandResult:
+        self.calls.append(args)
+        if args[:3] == ("shell", "rm", "-f"):
+            self.remote_file_content = None
+            return AdbCommandResult(args=list(args), returncode=0, stdout="", stderr="")
+        if args[:2] == ("exec-out", "cat"):
+            if self.remote_file_content is None:
+                if check_output:
+                    raise AdbError(
+                        "adb command failed (1): exec-out cat -- "
+                        "No such file or directory"
+                    )
+                return AdbCommandResult(
+                    args=list(args),
+                    returncode=1,
+                    stdout="",
+                    stderr="No such file or directory",
+                )
+            return AdbCommandResult(
+                args=list(args),
+                returncode=0,
+                stdout=self.remote_file_content,
+                stderr="",
+            )
+        return AdbCommandResult(args=list(args), returncode=0, stdout="", stderr="")
+
+
+def test_dump_ui_xml_deletes_remote_path_before_first_attempt(tmp_path) -> None:
+    """The stale-file fix is unconditional: even on the ordinary happy
+    path, `rm -f <remote_path>` is issued before `uiautomator dump`."""
+    client = FakeAdbClient()
+    dump_ui_xml(client, lock_dir=tmp_path, retry_backoff_s=0.0)
+
+    rm_calls = [c for c in client.calls if c[:3] == ("shell", "rm", "-f")]
+    assert len(rm_calls) == 1
+
+    dump_index = next(
+        i for i, c in enumerate(client.calls) if "uiautomator dump" in c[-1]
+    )
+    rm_index = next(
+        i for i, c in enumerate(client.calls) if c[:3] == ("shell", "rm", "-f")
+    )
+    assert rm_index < dump_index
+
+
+def test_dump_ui_xml_normal_success_overwrites_a_pre_existing_stale_file(
+    tmp_path,
+) -> None:
+    """A stale file already sitting at remote_path from an earlier,
+    unrelated call must not leak into a NEW successful dump's result."""
+    client = _RemoteFileFakeAdbClient(
+        initial_remote_content=_STALE_XML,
+        dump_outcomes=[AdbCommandResult(args=[], returncode=0, stdout="", stderr="")],
+        fresh_dump_xml=SAMPLE_DUMP_XML,
+    )
+    xml = dump_ui_xml(client, lock_dir=tmp_path, retry_backoff_s=0.0)
+    assert xml == SAMPLE_DUMP_XML
+    assert "STALE-FROM-A-PREVIOUS-DUMP" not in xml
+
+
+def test_dump_ui_xml_raises_on_idle_failure_even_with_exit_zero(tmp_path) -> None:
+    """The single most important case: `uiautomator dump` prints
+    'ERROR: could not get idle state.' but STILL EXITS 0. Must raise
+    UiDumpTimeoutError -- never return content, cached or otherwise."""
+    client = _RemoteFileFakeAdbClient(
+        initial_remote_content=_STALE_XML,
+        dump_outcomes=[_IDLE_FAILURE_RESULT],
+    )
+
+    with pytest.raises(UiDumpTimeoutError) as excinfo:
+        dump_ui_xml(client, lock_dir=tmp_path, retry_backoff_s=0.0)
+
+    exc = excinfo.value
+    assert "idle" in str(exc).lower()
+    assert "exit code" in str(exc).lower()
+    assert exc.extra["serial"] == client.serial
+    assert isinstance(exc.extra["duration_s"], float)
+    assert exc.extra["duration_s"] >= 0.0
+    assert "could not get idle state" in exc.extra["stdout"]
+
+    # No fallback to the stale tree: `cat` is never even reached, and the
+    # stale file was already cleared by the pre-dump `rm -f`.
+    cat_calls = [c for c in client.calls if c[:2] == ("exec-out", "cat")]
+    assert cat_calls == []
+    assert client.remote_file_content is None
+
+
+def test_dump_ui_xml_idle_failure_is_not_retried(tmp_path) -> None:
+    """Distinct from the collision signature: the idle failure is NEVER
+    folded into the bounded collision-retry loop -- it raises on the very
+    first occurrence, even though max_retries > 0."""
+    client = _RemoteFileFakeAdbClient(dump_outcomes=[_IDLE_FAILURE_RESULT])
+
+    with pytest.raises(UiDumpTimeoutError):
+        dump_ui_xml(client, lock_dir=tmp_path, retry_backoff_s=0.0, max_retries=3)
+
+    dump_shell_calls = [c for c in client.calls if "uiautomator dump" in c[-1]]
+    assert len(dump_shell_calls) == 1  # no retry attempted
+
+
+def test_dump_ui_xml_never_serves_stale_file_after_unrelated_failure(tmp_path) -> None:
+    """A stale file present from a prior dump must never be returned after
+    a FAILED (non-collision, non-idle) dump in the current call."""
+    client = _RemoteFileFakeAdbClient(
+        initial_remote_content=_STALE_XML,
+        dump_outcomes=[_UNRELATED_FAILURE_RESULT],
+    )
+
+    with pytest.raises(AdbError, match="uiautomator: not found"):
+        dump_ui_xml(client, lock_dir=tmp_path, retry_backoff_s=0.0)
+
+    cat_calls = [c for c in client.calls if c[:2] == ("exec-out", "cat")]
+    assert cat_calls == []
+    assert client.remote_file_content is None
+
+
+def test_dump_ui_xml_never_serves_stale_file_after_collision_exhausted(
+    tmp_path,
+) -> None:
+    """Same guarantee through the OTHER failure path: collision retries
+    exhausted must not leave a stale tree servable either."""
+    client = _RemoteFileFakeAdbClient(
+        initial_remote_content=_STALE_XML,
+        dump_outcomes=[_COLLISION_RESULT, _COLLISION_RESULT, _COLLISION_RESULT],
+    )
+
+    with pytest.raises(UiDumpCollisionError):
+        dump_ui_xml(client, lock_dir=tmp_path, retry_backoff_s=0.0, max_retries=2)
+
+    cat_calls = [c for c in client.calls if c[:2] == ("exec-out", "cat")]
+    assert cat_calls == []
+    assert client.remote_file_content is None
+
+
+def test_dump_ui_xml_collision_retry_path_unaffected_by_the_fix(tmp_path) -> None:
+    """The existing collision-retry behaviour (Defect 1) is unchanged by
+    the staleness fix: fails twice with the collision signature, succeeds
+    on the third try, and returns the FRESH content -- not the stale one
+    that was sitting there beforehand."""
+    client = _RemoteFileFakeAdbClient(
+        initial_remote_content=_STALE_XML,
+        dump_outcomes=[
+            _COLLISION_RESULT,
+            _COLLISION_RESULT,
+            AdbCommandResult(args=[], returncode=0, stdout="", stderr=""),
+        ],
+        fresh_dump_xml=SAMPLE_DUMP_XML,
+    )
+    xml = dump_ui_xml(client, lock_dir=tmp_path, retry_backoff_s=0.0, max_retries=3)
+    assert xml == SAMPLE_DUMP_XML
+    assert "STALE-FROM-A-PREVIOUS-DUMP" not in xml
+    dump_shell_calls = [c for c in client.calls if "uiautomator dump" in c[-1]]
+    assert len(dump_shell_calls) == 3  # 2 failures + 1 success

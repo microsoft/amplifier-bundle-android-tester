@@ -19,6 +19,7 @@ Operations:
 
 from __future__ import annotations
 
+import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -771,7 +772,14 @@ class AndroidInspectorTool:
         self, state: AndroidInspectorState, inp: dict[str, Any]
     ) -> dict[str, Any]:
         client = self._client_for(state, inp)
+        # Wall-clock duration of the dump is surfaced in the result because
+        # it was the field tell that distinguished a healthy dump (~2s) from
+        # one that silently served a stale tree (~11s, before the fix in
+        # ui.dump_ui_xml that now raises UiDumpTimeoutError for that case
+        # instead of falling back to cached content).
+        dump_start = time.monotonic()
         nodes = dump_ui(client, lock_dir=state.run_dir)
+        dump_duration_s = time.monotonic() - dump_start
         all_nodes = bool(inp.get("all_nodes", False))
         filtered = nodes if all_nodes else [n for n in nodes if n.has_content()]
         anr = find_anr(nodes)
@@ -782,6 +790,7 @@ class AndroidInspectorTool:
                 "node_count": len(filtered),
                 "total_node_count": len(nodes),
                 "anr": anr,
+                "dump_duration_s": round(dump_duration_s, 3),
             }
         )
 
