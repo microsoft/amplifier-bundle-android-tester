@@ -54,6 +54,7 @@ from .emulator import (
 from .evidence import unique_evidence_path
 from .ui import (
     SelectorError,
+    UiDumpCollisionError,
     UiDumpError,
     UiInteractionError,
     dump_ui,
@@ -212,7 +213,10 @@ class AndroidInspectorTool:
             "center, focused, clickable, enabled) — not raw XML\n"
             "- find: nodes matching a selector, with resolved centers (does not error on "
             "0 or >1 matches)\n"
-            "- logcat: tail/filter\n\n"
+            "- logcat: tail/filter by tag ('filter_spec') and/or by 'package' (resolved "
+            "to running pid(s) via pidof/ps, scoped with --pid; composes with "
+            "filter_spec rather than overriding it; errors by name if the package isn't "
+            "running, instead of returning an empty result)\n\n"
             "Interacting — selector-first:\n"
             "- tap: dump -> resolve selector -> tap center -> re-dump -> report what changed\n"
             "- type_text: tap -> assert focus -> MOVE_END + N*DEL -> input text -> BACK -> "
@@ -327,9 +331,13 @@ class AndroidInspectorTool:
                 "package": {
                     "type": "string",
                     "description": (
-                        "Package name (launch, stop_app). launch resolves the launcher "
-                        "activity via 'cmd package resolve-activity', falling back to "
-                        "'monkey -c LAUNCHER' only if resolution yields nothing."
+                        "Package name (launch, stop_app, logcat). launch resolves the "
+                        "launcher activity via 'cmd package resolve-activity', falling "
+                        "back to 'monkey -c LAUNCHER' only if resolution yields nothing. "
+                        "logcat: resolves to the package's running pid(s) (pidof, falling "
+                        "back to 'ps -A') and scopes output to them via --pid, composing "
+                        "with 'filter_spec' rather than overriding it. Errors (does not "
+                        "return an empty result) if the package has no running process."
                     ),
                 },
                 "component": {
@@ -459,6 +467,13 @@ class AndroidInspectorTool:
             return _err(str(exc), **exc.extra)
         except SelectorError as exc:
             return _err(str(exc), candidates=[n.to_dict() for n in exc.candidates])
+        except UiDumpCollisionError as exc:
+            # UiDumpCollisionError subclasses UiDumpError -- must be caught
+            # before it, so its structured `.extra` (serial, attempts,
+            # max_retries, last observed stderr/stdout) reaches the caller
+            # instead of being collapsed to a bare message. Same pattern as
+            # LaunchError/AvdError above.
+            return _err(str(exc), **exc.extra)
         except (AdbError, EmulatorError, UiDumpError, UiInteractionError) as exc:
             return _err(str(exc))
         except Exception as exc:  # noqa: BLE001
@@ -688,7 +703,7 @@ class AndroidInspectorTool:
         self, state: AndroidInspectorState, inp: dict[str, Any]
     ) -> dict[str, Any]:
         client = self._client_for(state, inp)
-        nodes = dump_ui(client)
+        nodes = dump_ui(client, lock_dir=state.run_dir)
         all_nodes = bool(inp.get("all_nodes", False))
         filtered = nodes if all_nodes else [n for n in nodes if n.has_content()]
         anr = find_anr(nodes)
@@ -709,7 +724,7 @@ class AndroidInspectorTool:
         if not selector:
             return _err("Missing required parameter: selector")
         client = self._client_for(state, inp)
-        nodes = dump_ui(client)
+        nodes = dump_ui(client, lock_dir=state.run_dir)
         matches = find_nodes(nodes, selector)
         return _ok(
             {
@@ -726,11 +741,38 @@ class AndroidInspectorTool:
         client = self._client_for(state, inp)
         lines = int(inp.get("lines", 200))
         filter_spec = inp.get("filter_spec")
-        result = client.logcat_dump(lines=lines, filter_spec=filter_spec)
-        out_lines = result.stdout.splitlines()
-        return _ok(
-            {"serial": client.serial, "lines": out_lines, "count": len(out_lines)}
-        )
+        package = inp.get("package")
+
+        pids: list[str] | None = None
+        if package:
+            resolved_pids = client.resolve_package_pids(package)
+            if not resolved_pids:
+                # Distinct from "no log output": there is nothing to filter
+                # for because the package has no running process at all --
+                # never silently returned as an empty (and therefore
+                # ambiguous-looking) log result.
+                return _err(
+                    f"Package {package!r} is not running on {client.serial!r} -- "
+                    "no pid to filter logcat by.",
+                    serial=client.serial,
+                    package=package,
+                )
+            pids = resolved_pids
+
+        dump = client.logcat_dump(lines=lines, filter_spec=filter_spec, pids=pids)
+        out_lines = dump.stdout.splitlines()
+        response: dict[str, Any] = {
+            "serial": client.serial,
+            "lines": out_lines,
+            "count": len(out_lines),
+        }
+        if package:
+            response["package"] = package
+            response["pids_requested"] = dump.pids_requested
+            response["pids_used"] = dump.pids_used
+            if dump.pid_fallback_reason:
+                response["pid_fallback_reason"] = dump.pid_fallback_reason
+        return _ok(response)
 
     # -- Interacting --------------------------------------------------------
 
@@ -739,7 +781,7 @@ class AndroidInspectorTool:
         if not selector:
             return _err("Missing required parameter: selector")
         client = self._client_for(state, inp)
-        result = tap_selector(client, selector)
+        result = tap_selector(client, selector, lock_dir=state.run_dir)
         result["serial"] = client.serial
         return _ok(result)
 
@@ -763,7 +805,7 @@ class AndroidInspectorTool:
         if text is None:
             return _err("Missing required parameter: text")
         client = self._client_for(state, inp)
-        result = _type_text_impl(client, selector, text)
+        result = _type_text_impl(client, selector, text, lock_dir=state.run_dir)
         result["serial"] = client.serial
         return _ok(result)
 
@@ -814,6 +856,7 @@ class AndroidInspectorTool:
             timeout_s=float(inp.get("timeout_s", 10.0)),
             poll_s=float(inp.get("poll_s", 1.0)),
             absent=bool(inp.get("absent", False)),
+            lock_dir=state.run_dir,
         )
         result["serial"] = client.serial
         return _ok(result)
@@ -822,7 +865,7 @@ class AndroidInspectorTool:
         self, state: AndroidInspectorState, inp: dict[str, Any]
     ) -> dict[str, Any]:
         client = self._client_for(state, inp)
-        result = _dismiss_anr_impl(client)
+        result = _dismiss_anr_impl(client, lock_dir=state.run_dir)
         result["serial"] = client.serial
         return _ok(result)
 

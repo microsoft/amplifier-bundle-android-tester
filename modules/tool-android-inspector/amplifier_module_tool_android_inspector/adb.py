@@ -21,7 +21,7 @@ import shutil
 import subprocess
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
@@ -35,6 +35,7 @@ __all__ = [
     "AdbCommandResult",
     "AdbError",
     "LaunchError",
+    "LogcatDumpResult",
     "RawDevice",
     "launch_app",
     "list_raw_devices",
@@ -75,6 +76,26 @@ class AdbCommandResult:
     @property
     def ok(self) -> bool:
         return self.returncode == 0
+
+
+@dataclass
+class LogcatDumpResult:
+    """Result of `AdbClient.logcat_dump`, including the pid-filtering metadata
+    a bare `AdbCommandResult` has no room for.
+
+    `pids_used` and `pid_fallback_reason` are only meaningful when the call
+    was package-scoped (`pids` was passed in); both are empty/`None` for a
+    plain tag-filtered/unfiltered dump.
+    """
+
+    result: AdbCommandResult
+    pids_requested: list[str] = field(default_factory=list)
+    pids_used: list[str] = field(default_factory=list)
+    pid_fallback_reason: str | None = None
+
+    @property
+    def stdout(self) -> str:
+        return self.result.stdout
 
 
 @dataclass
@@ -790,13 +811,113 @@ class AdbClient:
 
     # -- Logs / files ---------------------------------------------------------
 
+    def resolve_package_pids(self, package: str) -> list[str]:
+        """Resolve every running pid for `package` on-device.
+
+        Tries, in order:
+        1. `pidof <package>` -- prints ALL matching pids space-separated.
+           Deliberately NOT `pidof -s` (single) \u2014 that would silently drop
+           pids of a multi-process app, exactly the truncation this exists
+           to avoid.
+        2. `ps -A` fallback, matching the `NAME` column against `package` --
+           for devices where `pidof` is absent or behaves oddly. Handles
+           both the `toybox`-style `ps -A` header (`... NAME`) and older
+           `toolbox` layouts, since both expose `PID` and `NAME` columns by
+           name; if the header doesn't have both, the fallback is skipped
+           rather than guessing column positions.
+
+        Returns an empty list if the package has no running process
+        anywhere on the device \u2014 never raises. \"Not running\" is a fact for
+        the caller to decide how to handle (see `logcat`'s package-not-running
+        structured error), not this function's business.
+        """
+        pidof_result = self.shell(f"pidof {shlex.quote(package)}", check_output=False)
+        if pidof_result.ok:
+            pids = pidof_result.stdout.split()
+            if pids:
+                return pids
+
+        ps_result = self.shell("ps -A", check_output=False)
+        if not ps_result.ok:
+            return []
+        lines = ps_result.stdout.splitlines()
+        if not lines:
+            return []
+        header = lines[0].split()
+        try:
+            pid_idx = header.index("PID")
+            name_idx = header.index("NAME")
+        except ValueError:
+            # Unrecognized ps header shape -- can't reliably parse columns.
+            return []
+
+        pids = []
+        for line in lines[1:]:
+            parts = line.split()
+            if len(parts) <= max(pid_idx, name_idx):
+                continue
+            if parts[name_idx] == package:
+                pids.append(parts[pid_idx])
+        return pids
+
     def logcat_dump(
-        self, *, lines: int = 200, filter_spec: str | None = None
-    ) -> AdbCommandResult:
-        args = ["logcat", "-d", "-t", str(lines)]
-        if filter_spec:
-            args.extend(filter_spec.split())
-        return self.run(*args, check_output=True)
+        self,
+        *,
+        lines: int = 200,
+        filter_spec: str | None = None,
+        pids: list[str] | None = None,
+    ) -> LogcatDumpResult:
+        """`logcat -d -t <lines>`, optionally scoped to `pids` (via repeated
+        `--pid`) and/or a tag `filter_spec` -- the two compose (pid scoping
+        AND tag filtering both apply), neither overrides the other.
+
+        If more than one pid is given and the device's logcat rejects
+        repeated `--pid` (nonzero exit), falls back to the FIRST resolved
+        pid rather than silently truncating without saying so --
+        `pid_fallback_reason` on the returned `LogcatDumpResult` names which
+        pid was chosen and why. A single pid, or no pids at all, never hits
+        the fallback path.
+        """
+
+        def build_args(pid_list: list[str]) -> list[str]:
+            args = ["logcat", "-d", "-t", str(lines)]
+            for pid in pid_list:
+                args.extend(["--pid", str(pid)])
+            if filter_spec:
+                args.extend(filter_spec.split())
+            return args
+
+        if not pids:
+            result = self.run(*build_args([]), check_output=True)
+            return LogcatDumpResult(result=result)
+
+        result = self.run(*build_args(pids), check_output=False)
+        if result.ok or len(pids) == 1:
+            if not result.ok:
+                raise AdbError(
+                    f"logcat failed ({result.returncode}): "
+                    f"{(result.stderr or result.stdout).strip()}"
+                )
+            return LogcatDumpResult(
+                result=result, pids_requested=list(pids), pids_used=list(pids)
+            )
+
+        # Multiple --pid rejected by this device's logcat -- fall back to
+        # the first resolved pid, naming which one and why.
+        fallback_pid = pids[0]
+        fallback_result = self.run(*build_args([fallback_pid]), check_output=True)
+        reason = (
+            "This device's logcat rejected multiple --pid flags "
+            f"({(result.stderr or result.stdout).strip()!r}); fell back to pid "
+            f"{fallback_pid!r} (first of {len(pids)} resolved for the package). "
+            "Logs from the package's other process(es) are not included."
+        )
+        return LogcatDumpResult(
+            result=fallback_result,
+            pids_requested=list(pids),
+            pids_used=[fallback_pid],
+            pid_fallback_reason=reason,
+        )
 
     def pull(self, remote: str, local: str) -> AdbCommandResult:
         return self.run("pull", remote, local, check_output=True)

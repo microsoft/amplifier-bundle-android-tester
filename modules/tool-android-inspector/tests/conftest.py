@@ -62,6 +62,12 @@ class FakeAdbClient:
     dump_xml_queue: list[str] = field(default_factory=list)
     calls: list[tuple[str, ...]] = field(default_factory=list)
     default_dump_xml: str = SAMPLE_DUMP_XML
+    # Queue of canned results for `.shell()` calls specifically (e.g. the
+    # `uiautomator dump` invocation itself, as opposed to the `exec-out cat`
+    # step, which goes through `.run()`). Consumed in order; once empty,
+    # falls back to the default returncode=0/empty-output behaviour below.
+    # Used by the Defect 1 (dump-collision retry) tests in test_ui.py.
+    shell_result_queue: list[AdbCommandResult] = field(default_factory=list)
 
     def shell(
         self, command, *, check_output: bool = False, timeout: float | None = None
@@ -71,6 +77,14 @@ class FakeAdbClient:
         else:
             args = ("shell", command)
         self.calls.append(args)
+        if self.shell_result_queue:
+            canned = self.shell_result_queue.pop(0)
+            return AdbCommandResult(
+                args=list(args),
+                returncode=canned.returncode,
+                stdout=canned.stdout,
+                stderr=canned.stderr,
+            )
         return AdbCommandResult(args=list(args), returncode=0, stdout="", stderr="")
 
     def run(

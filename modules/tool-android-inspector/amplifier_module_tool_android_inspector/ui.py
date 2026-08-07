@@ -19,16 +19,21 @@ import shlex
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
-from .adb import AdbClientLike
+from .adb import AdbClientLike, AdbError
+from .lock import dump_lock
 
 __all__ = [
+    "DEFAULT_DUMP_COLLISION_BACKOFF_S",
+    "DEFAULT_DUMP_COLLISION_RETRIES",
     "DEFAULT_DUMP_REMOTE_PATH",
     "SETTLE_AFTER_TAP_S",
     "SETTLE_AFTER_TEXT_S",
     "Node",
     "SelectorError",
+    "UiDumpCollisionError",
     "UiDumpError",
     "UiInteractionError",
     "center_of",
@@ -72,9 +77,35 @@ _TRUE_VALUES = {"true", "1"}
 _ANR_TEXT_MARKERS = ("isn't responding", "isn\u2019t responding")
 _ANR_WAIT_TEXT = "Wait"
 
+# `uiautomator dump` colliding with another live uiautomator instance on the
+# same device raises this on-device, typically surfacing to adb shell as
+# exit 137. Detected on message content, not bare exit code -- 137 (SIGKILL)
+# has many unrelated causes (OOM, host kill); these two substrings are what
+# uiautomator itself prints for exactly this collision.
+_ALREADY_REGISTERED_MARKER = "already registered"
+_UIAUTOMATION_SERVICE_MARKER = "UiAutomationService"
+
+DEFAULT_DUMP_COLLISION_RETRIES = 3
+DEFAULT_DUMP_COLLISION_BACKOFF_S = 0.5
+
 
 class UiDumpError(RuntimeError):
     """Raised when a UI dump cannot be obtained or parsed."""
+
+
+class UiDumpCollisionError(UiDumpError):
+    """Raised when `uiautomator dump` collided with a competing uiautomator
+    instance on the same device and the bounded retry was exhausted.
+
+    Carries `.extra` (serial, attempts made, max_retries, the last observed
+    stderr/stdout, and an explicit `note` of the honest limitation) so a
+    caller sees exactly what was tried rather than a bare message -- same
+    pattern as `adb.LaunchError`.
+    """
+
+    def __init__(self, message: str, **extra: Any) -> None:
+        super().__init__(message)
+        self.extra: dict[str, Any] = extra
 
 
 class SelectorError(RuntimeError):
@@ -303,25 +334,100 @@ def find_anr(nodes: list[Node]) -> dict[str, Any] | None:
 # ---------------------------------------------------------------------------
 
 
+def _looks_like_uiautomator_collision(stdout: str, stderr: str) -> bool:
+    """True if `stdout`/`stderr` show the on-device
+    `IllegalStateException: UiAutomationService ... already registered!`
+    collision -- checked on message content, never on exit code alone (see
+    module-level constants for why)."""
+    combined = f"{stdout}\n{stderr}"
+    return (
+        _ALREADY_REGISTERED_MARKER in combined
+        or _UIAUTOMATION_SERVICE_MARKER in combined
+    )
+
+
 def dump_ui_xml(
-    client: AdbClientLike, remote_path: str = DEFAULT_DUMP_REMOTE_PATH
+    client: AdbClientLike,
+    remote_path: str = DEFAULT_DUMP_REMOTE_PATH,
+    *,
+    lock_dir: Path | None = None,
+    max_retries: int = DEFAULT_DUMP_COLLISION_RETRIES,
+    retry_backoff_s: float = DEFAULT_DUMP_COLLISION_BACKOFF_S,
 ) -> str:
-    """Run `uiautomator dump` on-device and return the resulting XML text."""
-    client.shell(f"uiautomator dump {remote_path}", check_output=True)
-    result = client.run("exec-out", "cat", remote_path, check_output=True)
-    if not result.stdout.strip():
-        raise UiDumpError(
-            "uiautomator dump produced no output — the device screen may be off, "
-            "or the accessibility service failed to attach."
-        )
-    return result.stdout
+    """Run `uiautomator dump` on-device and return the resulting XML text.
+
+    Serialised per-serial via an OS-level, cross-process file lock (see
+    `lock.dump_lock`) -- `tap`, `type_text`, `find`, and `wait_for` all dump
+    internally, and `wait_for`'s poll loop makes overlapping dumps against
+    the same device likely the moment two invocations of this tool run
+    concurrently against it. Two `uiautomator dump` processes racing on one
+    device collide with `IllegalStateException: UiAutomationService ...
+    already registered!` (adb shell typically reporting exit 137);
+    serialising this tool's own dumps eliminates that self-inflicted case.
+
+    On that specific collision signature (message content, not bare exit
+    code), retries up to `max_retries` times with a `retry_backoff_s` pause
+    between attempts. No other failure is retried -- a general retry here
+    would mask real failures (device offline, screen off, etc.) behind a
+    "just try again" that has nothing to do with this specific race.
+
+    Raises:
+        AdbError: the dump failed for a reason OTHER than the uiautomator
+            collision signature.
+        UiDumpCollisionError: the collision signature was seen and retries
+            were exhausted. `.extra` names the serial, attempts made, and
+            the last observed stderr/stdout, and its message states the
+            honest limit explicitly: this lock only serialises *this
+            tool's* dumps -- a different process on the host dumping the
+            same device concurrently is not covered and can still collide.
+        UiDumpError: the dump command succeeded but produced no output.
+    """
+    with dump_lock(client.serial, lock_dir):
+        attempt = 0
+        while True:
+            result = client.shell(f"uiautomator dump {remote_path}", check_output=False)
+            if result.ok:
+                break
+            if not _looks_like_uiautomator_collision(result.stdout, result.stderr):
+                raise AdbError(
+                    f"uiautomator dump failed ({result.returncode}): "
+                    f"{(result.stderr or result.stdout).strip()}"
+                )
+            attempt += 1
+            if attempt > max_retries:
+                raise UiDumpCollisionError(
+                    f"uiautomator dump on {client.serial!r} collided with a "
+                    f"competing uiautomator instance ({max_retries} retries "
+                    f"exhausted): {(result.stderr or result.stdout).strip()!r}. "
+                    "This tool serialises its OWN dumps per-serial, but that "
+                    "lock cannot serialise against a DIFFERENT process on "
+                    "this host dumping the same device concurrently -- that "
+                    "is the most likely remaining cause.",
+                    serial=client.serial,
+                    attempts=attempt,
+                    max_retries=max_retries,
+                    last_stderr=result.stderr,
+                    last_stdout=result.stdout,
+                )
+            time.sleep(retry_backoff_s)
+
+        cat_result = client.run("exec-out", "cat", remote_path, check_output=True)
+        if not cat_result.stdout.strip():
+            raise UiDumpError(
+                "uiautomator dump produced no output — the device screen may "
+                "be off, or the accessibility service failed to attach."
+            )
+        return cat_result.stdout
 
 
 def dump_ui(
-    client: AdbClientLike, remote_path: str = DEFAULT_DUMP_REMOTE_PATH
+    client: AdbClientLike,
+    remote_path: str = DEFAULT_DUMP_REMOTE_PATH,
+    *,
+    lock_dir: Path | None = None,
 ) -> list[Node]:
     """Dump and parse the current UI in one step."""
-    xml_text = dump_ui_xml(client, remote_path=remote_path)
+    xml_text = dump_ui_xml(client, remote_path=remote_path, lock_dir=lock_dir)
     return parse_dump(xml_text)
 
 
@@ -335,9 +441,10 @@ def tap_selector(
     selector: dict[str, Any],
     *,
     remote_path: str = DEFAULT_DUMP_REMOTE_PATH,
+    lock_dir: Path | None = None,
 ) -> dict[str, Any]:
     """dump -> resolve selector -> tap center -> re-dump -> report what changed."""
-    nodes_before = dump_ui(client, remote_path)
+    nodes_before = dump_ui(client, remote_path, lock_dir=lock_dir)
     anr_before = find_anr(nodes_before)
     node = resolve_selector(nodes_before, selector)
     if node.center is None:
@@ -349,7 +456,7 @@ def tap_selector(
     client.run("shell", "input", "tap", str(x), str(y), check_output=True)
     time.sleep(SETTLE_AFTER_TAP_S)
 
-    nodes_after = dump_ui(client, remote_path)
+    nodes_after = dump_ui(client, remote_path, lock_dir=lock_dir)
     anr_after = find_anr(nodes_after)
 
     return {
@@ -391,6 +498,7 @@ def type_text(
     text: str,
     *,
     remote_path: str = DEFAULT_DUMP_REMOTE_PATH,
+    lock_dir: Path | None = None,
 ) -> dict[str, Any]:
     """The full verified field-write protocol.
 
@@ -399,7 +507,7 @@ def type_text(
     KEYCODE_BACK (dismiss IME — never "tap elsewhere") -> re-dump ->
     ASSERT readback equals intended (error out if not).
     """
-    nodes = dump_ui(client, remote_path)
+    nodes = dump_ui(client, remote_path, lock_dir=lock_dir)
     node = resolve_selector(nodes, selector)
     if node.center is None:
         raise UiInteractionError(
@@ -410,7 +518,7 @@ def type_text(
     client.run("shell", "input", "tap", str(x), str(y), check_output=True)
     time.sleep(SETTLE_AFTER_TAP_S)
 
-    nodes_focused = dump_ui(client, remote_path)
+    nodes_focused = dump_ui(client, remote_path, lock_dir=lock_dir)
     focused_node = resolve_selector(nodes_focused, selector)
     if not focused_node.focused:
         raise UiInteractionError(
@@ -432,7 +540,7 @@ def type_text(
     client.run("shell", "input", "keyevent", str(KEYCODE_BACK), check_output=True)
     time.sleep(SETTLE_AFTER_TEXT_S)
 
-    nodes_after = dump_ui(client, remote_path)
+    nodes_after = dump_ui(client, remote_path, lock_dir=lock_dir)
     after_node = resolve_selector(nodes_after, selector)
     if after_node.text != text:
         raise UiInteractionError(
@@ -460,6 +568,7 @@ def wait_for(
     poll_s: float = 1.0,
     absent: bool = False,
     remote_path: str = DEFAULT_DUMP_REMOTE_PATH,
+    lock_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Poll `ui_dump` until a selector appears (default) or disappears
     (absent=True), or timeout. This is the ONLY synchronisation mechanism in
@@ -469,7 +578,7 @@ def wait_for(
     match_count = 0
 
     while True:
-        nodes = dump_ui(client, remote_path)
+        nodes = dump_ui(client, remote_path, lock_dir=lock_dir)
         match_count = len(find_nodes(nodes, selector))
         condition_met = (match_count == 0) if absent else (match_count > 0)
         elapsed = time.monotonic() - start
@@ -493,12 +602,15 @@ def wait_for(
 
 
 def dismiss_anr(
-    client: AdbClientLike, *, remote_path: str = DEFAULT_DUMP_REMOTE_PATH
+    client: AdbClientLike,
+    *,
+    remote_path: str = DEFAULT_DUMP_REMOTE_PATH,
+    lock_dir: Path | None = None,
 ) -> dict[str, Any]:
     """Tap 'Wait' on an ANR dialog if one is present. Never runs silently as a
     side effect of another operation — must be explicitly invoked, and always
     reports what it found and did."""
-    nodes = dump_ui(client, remote_path)
+    nodes = dump_ui(client, remote_path, lock_dir=lock_dir)
     anr = find_anr(nodes)
     if not anr:
         return {"detected": False}
@@ -515,6 +627,6 @@ def dismiss_anr(
     client.run("shell", "input", "tap", str(x), str(y), check_output=True)
     time.sleep(SETTLE_AFTER_TAP_S)
 
-    nodes_after = dump_ui(client, remote_path)
+    nodes_after = dump_ui(client, remote_path, lock_dir=lock_dir)
     still_present = find_anr(nodes_after) is not None
     return {"detected": True, "dismissed": not still_present, **anr}

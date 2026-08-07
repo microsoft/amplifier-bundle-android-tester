@@ -6,16 +6,19 @@ emulator/device dependency."""
 from __future__ import annotations
 
 import pytest
+from amplifier_module_tool_android_inspector.adb import AdbCommandResult, AdbError
 from amplifier_module_tool_android_inspector.ui import (
     KEYCODE_BACK,
     KEYCODE_DEL,
     KEYCODE_MOVE_END,
     MIN_DELETE_PRESSES,
     SelectorError,
+    UiDumpCollisionError,
     UiDumpError,
     UiInteractionError,
     center_of,
     dismiss_anr,
+    dump_ui_xml,
     find_anr,
     find_nodes,
     parse_bounds,
@@ -389,3 +392,105 @@ def test_dismiss_anr_still_present_after_tap() -> None:
     result = dismiss_anr(client)
     assert result["detected"] is True
     assert result["dismissed"] is False
+
+
+# ---------------------------------------------------------------------------
+# dump_ui_xml -- Defect 1: per-serial serialisation + bounded collision retry
+# ---------------------------------------------------------------------------
+
+_COLLISION_RESULT = AdbCommandResult(
+    args=[],
+    returncode=137,
+    stdout="",
+    stderr=(
+        "java.lang.IllegalStateException: UiAutomationService "
+        "0198... already registered!"
+    ),
+)
+
+_UNRELATED_FAILURE_RESULT = AdbCommandResult(
+    args=[], returncode=1, stdout="", stderr="/system/bin/sh: uiautomator: not found"
+)
+
+
+def test_dump_ui_xml_succeeds_immediately_when_no_collision(tmp_path) -> None:
+    client = FakeAdbClient()
+    xml = dump_ui_xml(client, lock_dir=tmp_path, retry_backoff_s=0.0)
+    assert xml == SAMPLE_DUMP_XML
+    dump_shell_calls = [c for c in client.calls if "uiautomator dump" in c[-1]]
+    assert len(dump_shell_calls) == 1
+
+
+def test_dump_ui_xml_retries_on_collision_then_succeeds(tmp_path) -> None:
+    # Fails twice with the collision signature, succeeds on the third try --
+    # well within the default max_retries=3 budget.
+    client = FakeAdbClient(shell_result_queue=[_COLLISION_RESULT, _COLLISION_RESULT])
+    xml = dump_ui_xml(client, lock_dir=tmp_path, retry_backoff_s=0.0, max_retries=3)
+    assert xml == SAMPLE_DUMP_XML
+    dump_shell_calls = [c for c in client.calls if "uiautomator dump" in c[-1]]
+    assert len(dump_shell_calls) == 3  # 2 failures + 1 success
+
+
+def test_dump_ui_xml_raises_structured_error_when_retries_exhausted(tmp_path) -> None:
+    # Every attempt (initial + all retries) hits the collision signature.
+    client = FakeAdbClient(
+        shell_result_queue=[_COLLISION_RESULT, _COLLISION_RESULT, _COLLISION_RESULT]
+    )
+    with pytest.raises(UiDumpCollisionError) as excinfo:
+        dump_ui_xml(client, lock_dir=tmp_path, retry_backoff_s=0.0, max_retries=2)
+
+    exc = excinfo.value
+    assert exc.extra["serial"] == client.serial
+    assert exc.extra["max_retries"] == 2
+    assert exc.extra["attempts"] == 3  # initial attempt + 2 retries
+    assert "already registered" in exc.extra["last_stderr"]
+    # Names the cause and the honest limitation explicitly.
+    assert "competing uiautomator instance" in str(exc)
+    assert "different process" in str(exc).lower()
+
+    dump_shell_calls = [c for c in client.calls if "uiautomator dump" in c[-1]]
+    assert len(dump_shell_calls) == 3  # initial + 2 retries, no 4th attempt
+
+
+def test_dump_ui_xml_does_not_retry_unrelated_failure(tmp_path) -> None:
+    """A general retry here would mask real failures -- only the specific
+    collision signature is retried."""
+    client = FakeAdbClient(shell_result_queue=[_UNRELATED_FAILURE_RESULT])
+    with pytest.raises(AdbError, match="uiautomator: not found"):
+        dump_ui_xml(client, lock_dir=tmp_path, retry_backoff_s=0.0)
+
+    dump_shell_calls = [c for c in client.calls if "uiautomator dump" in c[-1]]
+    assert len(dump_shell_calls) == 1  # no retry attempted
+
+
+def test_dump_ui_xml_serialises_two_concurrent_dumps_for_same_serial(tmp_path) -> None:
+    """Proves the lock is actually exercised end-to-end from dump_ui_xml,
+    not merely constructed and ignored: two threads dumping the SAME serial
+    must never overlap inside the dump."""
+    import threading
+    import time
+
+    entered: list[str] = []
+    barrier = threading.Barrier(2)
+
+    class SlowFakeAdbClient(FakeAdbClient):
+        def run(self, *args, timeout=None, check_output=False):
+            if args[:2] == ("exec-out", "cat"):
+                entered.append("enter")
+                time.sleep(0.15)
+                entered.append("exit")
+            return super().run(*args, timeout=timeout, check_output=check_output)
+
+    client = SlowFakeAdbClient(serial="emulator-5554")
+
+    def worker() -> None:
+        barrier.wait()
+        dump_ui_xml(client, lock_dir=tmp_path, retry_backoff_s=0.0)
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5)
+
+    assert entered == ["enter", "exit", "enter", "exit"]

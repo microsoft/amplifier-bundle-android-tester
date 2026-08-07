@@ -162,6 +162,213 @@ def test_logcat_dump_includes_serial_and_filter_spec() -> None:
     assert argv[3:] == ["logcat", "-d", "-t", "50", "MyTag:D", "*:S"]
 
 
+# ---------------------------------------------------------------------------
+# resolve_package_pids (Defect 2)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_package_pids_via_pidof_single() -> None:
+    runner = make_text_runner(
+        responses={
+            ("shell", "pidof com.foo"): AdbCommandResult(
+                args=[], returncode=0, stdout="1234\n", stderr=""
+            )
+        }
+    )
+    client = AdbClient(serial=SERIAL, adb_path=ADB_PATH, runner=runner)
+    assert client.resolve_package_pids("com.foo") == ["1234"]
+
+
+def test_resolve_package_pids_via_pidof_multiple_not_truncated() -> None:
+    """Multi-process apps: pidof returns several pids -- ALL must come back,
+    never silently truncated to the first."""
+    runner = make_text_runner(
+        responses={
+            ("shell", "pidof com.foo"): AdbCommandResult(
+                args=[], returncode=0, stdout="1234 5678 9012\n", stderr=""
+            )
+        }
+    )
+    client = AdbClient(serial=SERIAL, adb_path=ADB_PATH, runner=runner)
+    assert client.resolve_package_pids("com.foo") == ["1234", "5678", "9012"]
+
+
+def test_resolve_package_pids_falls_back_to_ps_when_pidof_fails() -> None:
+    ps_output = (
+        "USER   PID  PPID VSZ RSS WCHAN ADDR S NAME\n"
+        "u0_a123 4321 456  100 200 0     0    S com.foo\n"
+        "u0_a999 999  456  100 200 0     0    S com.other\n"
+    )
+    runner = make_text_runner(
+        responses={
+            ("shell", "pidof com.foo"): AdbCommandResult(
+                args=[], returncode=1, stdout="", stderr=""
+            ),
+            ("shell", "ps -A"): AdbCommandResult(
+                args=[], returncode=0, stdout=ps_output, stderr=""
+            ),
+        }
+    )
+    client = AdbClient(serial=SERIAL, adb_path=ADB_PATH, runner=runner)
+    assert client.resolve_package_pids("com.foo") == ["4321"]
+
+
+def test_resolve_package_pids_falls_back_to_ps_when_pidof_empty() -> None:
+    ps_output = (
+        "USER PID PPID VSZ RSS WCHAN ADDR S NAME\nu0_a1 111 1 1 1 0 0 S com.foo\n"
+    )
+    runner = make_text_runner(
+        responses={
+            ("shell", "pidof com.foo"): AdbCommandResult(
+                args=[], returncode=0, stdout="", stderr=""
+            ),
+            ("shell", "ps -A"): AdbCommandResult(
+                args=[], returncode=0, stdout=ps_output, stderr=""
+            ),
+        }
+    )
+    client = AdbClient(serial=SERIAL, adb_path=ADB_PATH, runner=runner)
+    assert client.resolve_package_pids("com.foo") == ["111"]
+
+
+def test_resolve_package_pids_not_running_returns_empty_list() -> None:
+    ps_output = (
+        "USER PID PPID VSZ RSS WCHAN ADDR S NAME\nu0_a1 111 1 1 1 0 0 S com.other\n"
+    )
+    runner = make_text_runner(
+        responses={
+            ("shell", "pidof com.foo"): AdbCommandResult(
+                args=[], returncode=1, stdout="", stderr=""
+            ),
+            ("shell", "ps -A"): AdbCommandResult(
+                args=[], returncode=0, stdout=ps_output, stderr=""
+            ),
+        }
+    )
+    client = AdbClient(serial=SERIAL, adb_path=ADB_PATH, runner=runner)
+    assert client.resolve_package_pids("com.foo") == []
+
+
+def test_resolve_package_pids_ps_failure_returns_empty_list() -> None:
+    runner = make_text_runner(
+        responses={
+            ("shell", "pidof com.foo"): AdbCommandResult(
+                args=[], returncode=1, stdout="", stderr=""
+            ),
+            ("shell", "ps -A"): AdbCommandResult(
+                args=[], returncode=1, stdout="", stderr="permission denied"
+            ),
+        }
+    )
+    client = AdbClient(serial=SERIAL, adb_path=ADB_PATH, runner=runner)
+    assert client.resolve_package_pids("com.foo") == []
+
+
+def test_resolve_package_pids_unrecognized_ps_header_returns_empty_list() -> None:
+    runner = make_text_runner(
+        responses={
+            ("shell", "pidof com.foo"): AdbCommandResult(
+                args=[], returncode=1, stdout="", stderr=""
+            ),
+            ("shell", "ps -A"): AdbCommandResult(
+                args=[], returncode=0, stdout="garbage header\nrow1 row2\n", stderr=""
+            ),
+        }
+    )
+    client = AdbClient(serial=SERIAL, adb_path=ADB_PATH, runner=runner)
+    assert client.resolve_package_pids("com.foo") == []
+
+
+# ---------------------------------------------------------------------------
+# logcat_dump with pids -- composition, multi-pid, fallback (Defect 2)
+# ---------------------------------------------------------------------------
+
+
+def test_logcat_dump_single_pid_adds_pid_flag() -> None:
+    runner = make_text_runner()
+    client = AdbClient(serial=SERIAL, adb_path=ADB_PATH, runner=runner)
+    dump = client.logcat_dump(lines=100, pids=["1234"])
+    argv = runner.calls[-1]
+    assert argv[3:] == ["logcat", "-d", "-t", "100", "--pid", "1234"]
+    assert dump.pids_requested == ["1234"]
+    assert dump.pids_used == ["1234"]
+    assert dump.pid_fallback_reason is None
+
+
+def test_logcat_dump_pid_and_filter_spec_compose() -> None:
+    runner = make_text_runner()
+    client = AdbClient(serial=SERIAL, adb_path=ADB_PATH, runner=runner)
+    client.logcat_dump(lines=100, filter_spec="MyTag:D *:S", pids=["1234"])
+    argv = runner.calls[-1]
+    assert argv[3:] == [
+        "logcat",
+        "-d",
+        "-t",
+        "100",
+        "--pid",
+        "1234",
+        "MyTag:D",
+        "*:S",
+    ]
+
+
+def test_logcat_dump_multiple_pids_all_included_when_accepted() -> None:
+    runner = make_text_runner(
+        default=AdbCommandResult(args=[], returncode=0, stdout="log lines\n", stderr="")
+    )
+    client = AdbClient(serial=SERIAL, adb_path=ADB_PATH, runner=runner)
+    dump = client.logcat_dump(lines=100, pids=["1234", "5678"])
+    argv = runner.calls[-1]
+    assert argv[3:] == ["logcat", "-d", "-t", "100", "--pid", "1234", "--pid", "5678"]
+    assert dump.pids_used == ["1234", "5678"]
+    assert dump.pid_fallback_reason is None
+    assert dump.stdout == "log lines\n"
+
+
+def test_logcat_dump_falls_back_to_first_pid_when_multi_pid_rejected() -> None:
+    calls: list[list[str]] = []
+
+    def runner(argv: list[str], timeout: float) -> AdbCommandResult:
+        calls.append(argv)
+        if argv.count("--pid") > 1:
+            return AdbCommandResult(
+                args=argv, returncode=1, stdout="", stderr="unrecognized option --pid"
+            )
+        return AdbCommandResult(args=argv, returncode=0, stdout="ok\n", stderr="")
+
+    client = AdbClient(serial=SERIAL, adb_path=ADB_PATH, runner=runner)
+    dump = client.logcat_dump(lines=100, pids=["1234", "5678"])
+
+    assert len(calls) == 2  # multi-pid attempt, then single-pid fallback
+    assert calls[0][3:] == [
+        "logcat",
+        "-d",
+        "-t",
+        "100",
+        "--pid",
+        "1234",
+        "--pid",
+        "5678",
+    ]
+    assert calls[1][3:] == ["logcat", "-d", "-t", "100", "--pid", "1234"]
+    assert dump.pids_requested == ["1234", "5678"]
+    assert dump.pids_used == ["1234"]
+    assert dump.pid_fallback_reason is not None
+    assert "1234" in dump.pid_fallback_reason
+    assert dump.stdout == "ok\n"
+
+
+def test_logcat_dump_single_pid_failure_raises_no_fallback() -> None:
+    runner = make_text_runner(
+        default=AdbCommandResult(
+            args=[], returncode=1, stdout="", stderr="no such process"
+        )
+    )
+    client = AdbClient(serial=SERIAL, adb_path=ADB_PATH, runner=runner)
+    with pytest.raises(AdbError, match="no such process"):
+        client.logcat_dump(lines=100, pids=["1234"])
+
+
 def test_shell_with_string_vs_list_command() -> None:
     runner = make_text_runner()
     client = AdbClient(serial=SERIAL, adb_path=ADB_PATH, runner=runner)
