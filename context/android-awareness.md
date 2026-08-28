@@ -31,7 +31,7 @@ This bundle covers **on-device and emulator Android UI only**. Route elsewhere f
 
 **Do not run `adb`, `uiautomator`, or `emulator` commands directly from the root session.** Always delegate to an android-tester agent.
 
-The agents hold the procedural safety that raw adb does not enforce: serial scoping on every call, dump-before-tap, focus assertion before typing, `KEYCODE_BACK` to commit fields, and the aarch64 host workarounds. Driving adb by hand is how the two source projects silently installed an APK onto the wrong emulator and typed a URL into the wrong field.
+The agents hold the procedural safety that raw adb does not enforce: serial scoping on every call, dump-before-tap, focus assertion before typing, `KEYCODE_BACK` to commit fields, and the aarch64 host workarounds. Driving adb by hand is how the two source projects silently installed an APK onto the wrong emulator and typed a URL into the wrong field. Before any destructive operation (reinstall, `pm clear`, reboot), the agents also branch on serial *shape* — `emulator-*` vs `<ip>:<port>` — because a physical device is not recoverable by re-running the test.
 
 ## Prerequisites
 
