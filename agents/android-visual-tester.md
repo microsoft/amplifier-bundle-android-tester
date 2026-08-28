@@ -217,6 +217,7 @@ Apply to every capture.
 | Density/scale defect | Element sized correctly at one density, clipped at another |
 | Blank surface | A `SurfaceView`/`WebView` region rendering as solid colour |
 | ANR dialog | A system dialog on top of the app in the capture |
+| Edge-to-edge / API 35 clipping | Top or bottom controls sit under the status bar, display cutout, or gesture nav bar — systematically invisible on a stock emulator profile. Reproduce with `adb shell cmd overlay enable com.android.internal.display.cutout.emulation.tall` before sweeping |
 
 ## Failure Budget
 
