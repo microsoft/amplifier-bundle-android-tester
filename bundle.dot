@@ -1,82 +1,81 @@
-// This repository packages an AI assistant capability for testing and debugging Android apps on real devices and emulators.
-
+// android-tester: a bundle that equips an AI agent to install, drive, and visually verify Android apps via ADB/UI-automation, with dedicated agents for debugging, operating, and screenshot-based QA.
 digraph android_tester {
     rankdir=LR
     fontname="Helvetica"
     fontsize=12
-    label="Android Tester v0.1.0\nAn add-on that lets an AI assistant drive, inspect, and debug Android apps"
+    label="Android Tester v0.1.0\nAutomated Android App Testing Toolkit"
     labelloc=t
     labeljust=c
     nodesep=0.6
     ranksep=0.7
     bgcolor="white"
-    source_hash="38182d920f99a67543d3134903f08122009de7e2d6c54ad3c4a3fec6684d0641"
+    source_hash="90af432aef97d755ef52ab65825d6d4724c6e3672e4fb89625b39ac69959852d"
 
     node [fontname="Helvetica", fontsize=11, style="filled,rounded"]
     edge [fontname="Helvetica", fontsize=9]
 
-    root_android_tester [label="Android Tester (main entry point) v0.1.0\n0 tools · 0 agents\n~579 tok aggregate", shape=box, fillcolor="#80cbc4", style="filled,rounded,bold", penwidth=2]
+    root_android_tester [label="Android Tester v0.1.0\n0 tools · 0 agents\n~579 tok aggregate", shape=box, fillcolor="#80cbc4", style="filled,rounded,bold", penwidth=2]
 
     subgraph cluster_behaviors {
-        label="Capability Package — the reusable bundle of skills this repo adds"
+        label="Capabilities Bundle"
         style="filled"
         fillcolor="#f9f9f9"
         color="#999999"
 
-        beh_android_tester_behavior [label="Android Testing Capability\n1 tools · 1 ctx\n~2535 tok", shape=box, fillcolor="#e0f2f1", style="filled,rounded"]
+        beh_android_tester_behavior [label="Android Testing Toolkit\n1 tools · 1 ctx\n~2588 tok", shape=box, fillcolor="#e0f2f1", style="filled,rounded"]
     }
 
     subgraph cluster_agents {
-        label="Specialists — AI helpers, each with one job"
+        label="Specialist Agents"
         style="filled"
         fillcolor="#f9f9f9"
         color="#999999"
 
-        agt_android_debugger [label="Debugger\nInvestigates crashes and odd behavior\n~529 tok desc", shape=box, fillcolor="#c8e6c9", style="filled,rounded"]
-        agt_android_operator [label="Operator\nTaps, types, and navigates the app\n~565 tok desc", shape=box, fillcolor="#c8e6c9", style="filled,rounded"]
-        agt_android_visual_tester [label="Visual Tester\nChecks how screens look across devices\n~434 tok desc", shape=box, fillcolor="#c8e6c9", style="filled,rounded"]
+        agt_android_debugger [label="Android Debugger\nDiagnoses app crashes & errors\n~529 tok desc", shape=box, fillcolor="#c8e6c9", style="filled,rounded"]
+        agt_android_operator [label="Android Operator\nDrives app UI actions\n~565 tok desc", shape=box, fillcolor="#c8e6c9", style="filled,rounded"]
+        agt_android_visual_tester [label="Android Visual Tester\nScreenshot-based QA checks\n~434 tok desc", shape=box, fillcolor="#c8e6c9", style="filled,rounded"]
     }
 
     subgraph cluster_modules {
-        label="Device Connection — the code that talks to Android"
+        label="Tools"
         style="filled"
         fillcolor="#f9f9f9"
         color="#999999"
 
-        mod_tool_android_inspector [label="Android Device Inspector\nControls the phone and reads the screen", shape=box, fillcolor="#bbdefb", style="filled,rounded"]
+        mod_tool_android_inspector [label="Android Device Inspector\n(ADB & UI Automation)", shape=box, fillcolor="#bbdefb", style="filled,rounded"]
     }
 
     subgraph cluster_context {
-        label="Background Notes — always-on guidance for the assistant"
+        label="Reference Knowledge"
         style="filled"
         fillcolor="#f9f9f9"
         color="#999999"
 
-        ctx_android_awareness_md [label="Android basics primer\nandroid-awareness.md\n~800 tok", shape=box, fillcolor="#e1bee7", style="filled,rounded"]
+        ctx_android_awareness_md [label="Android Testing Awareness\nandroid-awareness.md\n~853 tok", shape=box, fillcolor="#e1bee7", style="filled,rounded"]
     }
 
     subgraph cluster_legend {
-        label="Legend — what each color means"
+        label="Legend"
         style="filled"
         fillcolor="white"
         color="#cccccc"
         fontsize=9
 
-        leg_root [label="main entry point", shape=box, fillcolor="#80cbc4", style="filled,rounded,bold", fontsize=9]
-        leg_behavior [label="capability package", shape=box, fillcolor="#e0f2f1", style="filled,rounded", fontsize=9]
-        leg_agent [label="specialist helper", shape=box, fillcolor="#c8e6c9", style="filled,rounded", fontsize=9]
-        leg_module [label="device connection code", shape=box, fillcolor="#bbdefb", style="filled,rounded", fontsize=9]
-        leg_provider [label="AI model source", shape=box, fillcolor="#e0e0e0", style="filled,rounded", fontsize=9]
-        leg_context [label="background notes", shape=box, fillcolor="#e1bee7", style="filled,rounded", fontsize=9]
-        leg_standalone [label="ready-to-run setup", shape=box, fillcolor="#80cbc4", style="filled,rounded", fontsize=9]
-        leg_experiment [label="experimental", shape=box, fillcolor="#e1bee7", style="filled,rounded", fontsize=9]
-        leg_ext_cost [label="borrowed, adds cost", shape=box, fillcolor="#80cbc4", style="dashed", color="red", penwidth=2, fontsize=9]
-        leg_ext_muted [label="borrowed, free", shape=box, fillcolor="#f5f5f5", style="dashed", fontsize=9]
+        leg_root [label="root bundle", shape=box, fillcolor="#80cbc4", style="filled,rounded,bold", fontsize=9]
+        leg_behavior [label="behavior", shape=box, fillcolor="#e0f2f1", style="filled,rounded", fontsize=9]
+        leg_agent [label="agent", shape=box, fillcolor="#c8e6c9", style="filled,rounded", fontsize=9]
+        leg_module [label="module", shape=box, fillcolor="#bbdefb", style="filled,rounded", fontsize=9]
+        leg_provider [label="provider", shape=box, fillcolor="#e0e0e0", style="filled,rounded", fontsize=9]
+        leg_context [label="context", shape=box, fillcolor="#e1bee7", style="filled,rounded", fontsize=9]
+        leg_standalone [label="standalone", shape=box, fillcolor="#80cbc4", style="filled,rounded", fontsize=9]
+        leg_experiment [label="experiment", shape=box, fillcolor="#e1bee7", style="filled,rounded", fontsize=9]
+        leg_ext_cost [label="ext+cost", shape=box, fillcolor="#80cbc4", style="dashed", color="red", penwidth=2, fontsize=9]
+        leg_ext_muted [label="ext+no-cost", shape=box, fillcolor="#f5f5f5", style="dashed", fontsize=9]
     }
 
-    disclaimer [label="\"tok\" = tokens, a rough measure of how much reading the AI does\nEstimates: ~4 characters per token\nSolid border = built here (counted)\nDashed + red = borrowed from elsewhere, adds hidden cost (not counted)\nDashed + muted = borrowed from elsewhere, no added cost\nNot counted: helper sessions, anything decided while running", shape=note, fillcolor="#eceff1", style="filled", fontsize=9]
+    disclaimer [label="Token estimates: ~4 chars/token\nSolid border = local (counted)\nDashed + red = external, hidden cost (not counted)\nDashed + muted = external, no cost\nExcludes: sub-session costs, runtime-dynamic", shape=note, fillcolor="#eceff1", style="filled", fontsize=9]
 
-    ext_githttps___github_com_microsoft_amplifier_foundation_main [label="Amplifier Foundation\nShared base toolkit (borrowed, adds cost)", shape=box, fillcolor="#80cbc4", style="dashed", color="red", penwidth=2]
+    ext_githttps___github_com_microsoft_amplifier_foundation_main [label="Amplifier Foundation\n(external, cost)", shape=box, fillcolor="#80cbc4", style="dashed", color="red", penwidth=2]
 
     root_android_tester -> ext_githttps___github_com_microsoft_amplifier_foundation_main [style=dashed]
     root_android_tester -> beh_android_tester_behavior [label="composes"]
