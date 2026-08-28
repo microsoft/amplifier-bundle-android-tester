@@ -263,6 +263,14 @@ Patterns seen repeatedly in the field:
 Signature: tapped point outside the node's dump bounds, often by 50–100px.
 Fix: resolve every coordinate from `ui_dump` / `find`.
 
+### "Tapped point is right, button still does nothing" → MaterialButton inset mismatch
+Signature: the tapped point is *inside* the node's dump bounds, dump unchanged after, and the
+button's visible extent looks larger than its bounds suggest.
+Cause: `MaterialButton` reads `insetTop`/`insetBottom` from the **`android:`** namespace, not
+`app:` — `app:insetTop` is silently accepted and does nothing. The dump's `bounds` are correct
+throughout; the button's *touchable* area is genuinely smaller than its visible area.
+Fix: confirm the layout XML uses `android:insetTop`/`android:insetBottom`, not `app:insetTop`.
+
 ### "Typed text went to the wrong field"
 Signature: after the tap, `focused=true` sits on a *neighbouring* node.
 Contributing cause: Compose `EditText` reporting `clickable="false"`, so a clickable-filter heuristic skipped it.
@@ -296,6 +304,18 @@ Fix: two-stage gate — `wait-for-device` → poll `sys.boot_completed` → `key
 Signature: plausible screen, `Last successful poll: never` in the dump, network errors in logcat.
 Cause: the app caught its network exceptions and rendered a seeded or cached state.
 Fix: never accept a screenshot as proof of live data — require independent confirmation.
+
+**When the property you need is not observable from adb at all** — which capture source is
+live, which transport a request used, which audio route was selected — a clean run proves
+nothing about *which* code path executed. Have the app log the branch it took, with its
+discriminating parameters, and assert on that line rather than on "the session completed":
+
+```
+audio_start source=mic sample_rate=48000 aec=true       # vs source=synthetic sample_rate=24000
+```
+
+A whole category of question is unanswerable after the fact without a marker like this — a run
+where the wrong branch was silently taken cannot be adjudicated at all from its evidence alone.
 
 ## Report Format
 
