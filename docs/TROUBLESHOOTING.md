@@ -4,6 +4,8 @@ Field knowledge from real sessions on an aarch64 Linux host (DGX Spark, Ubuntu 2
 
 Most of these workarounds are **owned by the tool** — `start_emulator` applies them automatically. This document explains *why*, so you recognise the symptom when the tool's automation is not in the path (a manual `adb` invocation, a different host, a future SDK version that moves things again).
 
+**See also:** [FIELD-NOTES-2026-08.md](FIELD-NOTES-2026-08.md) — wireless-debugging pairing, multi-lane emulator hygiene, `adb shell` data-extraction gotchas, self-hosted update rails, and evidence-provenance discipline, from a later extended real-device project.
+
 ---
 
 ## Quick Reference: Symptom → Cause → Fix
@@ -85,6 +87,37 @@ Unzip into `$ANDROID_HOME/emulator` and hand-write a `package.xml` (template fro
 **Cause:** Branch `aosp-emu-master-dev`, target `emulator-linux_aarch64`, last built **2025-01-16** (build id 12929531). `BUILD_INFO` still lists `sdk-repo-linux_aarch64-emulator-12929531.zip`, but the artifacts were purged by retention policy.
 
 **Fix:** None. **The route is dead — do not spend time on it.** Documented here specifically so the next person recognises the dead end in under a minute instead of an hour. Use the community build above, or build from AOSP source.
+
+### `/dev/kvm` exists but you're not in the group
+
+**Symptom:** `doctor`'s `kvm` check reports unavailable even though `/dev/kvm` is clearly present on the host, and adding yourself to the group and logging back in is not an option inside a running automation session.
+
+**Cause:** `/dev/kvm` is typically `0660 root:kvm`. Group membership is fixed at login — `id -nG` shows no `kvm` for the current session even on a host where KVM works fine for other logged-in users, and `getent group kvm` can show an empty member list regardless.
+
+**Fix:** launch under `sg`, which starts a process with an additional group without a new login session:
+
+```bash
+sg kvm -c 'test -r /dev/kvm && test -w /dev/kvm && echo KVM-OK'
+```
+
+If that prints `KVM-OK`, wrap the emulator launch itself the same way — only the emulator process needs the group; adb, uiautomator, and the tool calls stay outside the wrapper. `sg` takes a single command string, so build the whole launch (including any environment the emulator needs, set *inside* the string) in a variable and echo it once before running, rather than nesting quotes live.
+
+**If KVM genuinely cannot be reached,** an arm64 image on an arm64 host still runs unaccelerated (`-accel off`), but boot may take many minutes or never complete within a reasonable timeout — report this honestly as a last resort. Fixing group access is the real fix.
+
+---
+
+## Known Gaps — Manual `adb shell` Fallback Required
+
+These capabilities have no wrapped tool operation yet. Each is real signal that was needed in a live session; when you need it, drop to the manual invocation and treat every rule above (serial scoping, CRLF stripping, delegate-don't-drive-adb-yourself) as still binding.
+
+| Gap | Manual fallback |
+|---|---|
+| Notification content and count (`dumpsys notification`), `dumpsys` generally | [FIELD-NOTES-2026-08.md §3, "Reading notifications without a screenshot"](FIELD-NOTES-2026-08.md#3-shell-and-data-extraction-gotchas) |
+| Foreground/focus ground truth (`mCurrentFocus`) | [FIELD-NOTES-2026-08.md §3, "Ground truth for \"did navigation actually land\""](FIELD-NOTES-2026-08.md#3-shell-and-data-extraction-gotchas) |
+| APK identity (`aapt2 dump badging`), fresh-state install (`pm clear`) | [FIELD-NOTES-2026-08.md §3, "Reading identity out of an APK, and fresh-state installs"](FIELD-NOTES-2026-08.md#3-shell-and-data-extraction-gotchas) |
+| Self-hosted publish / update-rail verification | [FIELD-NOTES-2026-08.md §5, "App publishing and self-hosted update rails"](FIELD-NOTES-2026-08.md#5-app-publishing-and-self-hosted-update-rails), or load the `android-self-hosted-publishing` skill for the condensed rule set |
+| On-device sub-second UI sampling | [FIELD-NOTES-2026-08.md §3, "Catching a sub-second UI transition: sample on the device"](FIELD-NOTES-2026-08.md#3-shell-and-data-extraction-gotchas) |
+| Installed-vs-built hash comparison | [FIELD-NOTES-2026-08.md §5, "Prove the installed build is the build you just made"](FIELD-NOTES-2026-08.md#5-app-publishing-and-self-hosted-update-rails) |
 
 ---
 

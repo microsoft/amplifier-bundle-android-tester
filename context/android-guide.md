@@ -424,6 +424,65 @@ Call this whenever a run mysteriously stops responding to input, and consider it
 
 ---
 
+## Section 1.5: Physical Devices & Wireless Debugging
+
+Every operation is serial-scoped, so the same tooling drives a physical phone over wireless
+debugging exactly as it drives an emulator. Four things about that path are easy to get wrong
+the first time.
+
+### Pairing is two ports, and the pairing code expires in about a minute
+
+| Port | Where it comes from | Used by | Lifetime |
+|---|---|---|---|
+| **Pairing port** | The phone's *Pair device with pairing code* dialog, next to a 6-digit code | `adb pair` | The dialog is open |
+| **Connect port** | The *Wireless debugging* screen itself, under the device's IP | `adb connect` | Until wireless debugging is toggled or the network changes |
+
+```bash
+adb pair <phone-ip>:<PAIRPORT> <6-digit-code>     # both from the pairing dialog
+adb connect <phone-ip>:<CONNECTPORT>              # a DIFFERENT port, from the main screen
+adb devices                                        # serial is now <phone-ip>:<CONNECTPORT>
+```
+
+Have the `adb pair` command typed and ready before opening the dialog — reading the screen too
+slowly burns the code, and the fix is to close and reopen the dialog for a fresh one. **Both
+ports change** whenever wireless debugging is toggled or the phone rejoins the network, so a
+connect port recorded earlier is stale by the next session. Pairing itself survives; normally
+only the connection needs re-establishing. And the connection drops **silently** if the phone
+sleeps — the serial disappears from `adb devices` mid-run with no error attributed to it. Treat
+a vanished serial as "reconnect", not as a tooling bug.
+
+### Tell a physical device from an emulator by the shape of its serial
+
+| Shape | What it is |
+|---|---|
+| `emulator-5554` | An emulator console port |
+| `<phone-ip>:37xxx` | A physical device over wireless debugging |
+
+Branch on this shape before any destructive operation (reinstall, `pm clear`, reboot, process
+kill). Pinning the serial (Section 7, Invariant 1) prevents targeting the wrong device; checking
+the *shape* prevents doing something to a real phone that was only ever safe on a throwaway
+emulator — a physical device is not recoverable by re-running the test.
+
+### Reaching a host service differs between emulator and phone
+
+| Target | Host address from inside the app |
+|---|---|
+| Emulator | `10.0.2.2` — the emulator's alias for the host loopback |
+| Physical device over wireless | `10.0.2.2` does not exist. Use the host's actual routable address on the phone's network |
+| Either | `adb -s "$SERIAL" reverse tcp:PORT tcp:PORT`, after which the app uses `127.0.0.1:PORT` |
+
+`adb reverse` is the portable choice: it works identically on both device families, and it makes
+server-log correlation unambiguous because every request then arrives from `127.0.0.1`.
+
+### The device must be awake and unlocked for UI verification
+
+adb tolerates a locked screen for installs, `dumpsys`, and logcat. `uiautomator` does not: a
+locked device gives you the keyguard's tree, not the app's, and every tap lands on the lock
+screen. For an unattended run, plan for this ahead of time — phone left unlocked, screen timeout
+raised — or the run produces a full evidence set that describes the lock screen.
+
+---
+
 ## Section 2: Selector Syntax
 
 | Selector | Matches | Notes |
@@ -736,6 +795,19 @@ Without it, keystrokes go wherever focus already was. Silent, and the resulting 
 ### 4. Commit a field with `KEYCODE_BACK`, never by "tapping elsewhere"
 
 "Elsewhere" is another element. Tapping a label focuses the field beneath it and leaves the IME up, overlapping the bottom nav so your next taps are swallowed too.
+
+### 5. Never blanket-kill emulator processes
+
+A broad `pkill qemu` (or an equally broad pattern) matches every emulator on the host, not just yours — two AVDs on one host is the normal case, not the exotic one (Invariant 1). Worse, on a host where a physical device is also attached over wireless debugging, killing or restarting the adb server tears down that device's transport too. A phone is not a process you started, and its connection does not come back by re-running anything.
+
+Kill only the process you started, matched by *your* AVD name:
+
+```bash
+adb -s "$SERIAL" emu avd name                     # confirm which AVD this serial actually is
+pgrep -f "qemu-system-aarch64.*-avd <your-avd>"    # identify — print it before killing anything
+```
+
+Prefer `stop_emulator`, which performs `adb emu kill` and reaps only its own process. This is the symmetric rule to Invariant 1 for *stopping* an emulator rather than starting one — worth stating separately, because a cleanup path written in a hurry is exactly where blanket kills appear.
 
 ### Why these are in the tool and not just in prose
 

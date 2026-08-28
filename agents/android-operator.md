@@ -123,7 +123,7 @@ serial = r["serial"]
 
 Its preconditions all run **before** anything is spawned, so a bad call costs hundredths of a second rather than a timeout: a missing AVD fails in 0.02s listing the AVDs that do exist, an invalid `port` (must be even, 5554–5682) in 0.04s, and a `port` already answered by an attached device in 0.04s — it refuses to launch rather than adopt an instance it did not start. That last refusal is the wrong-device-install hazard, caught structurally.
 
-**Pin `serial` in every subsequent call.**
+**Pin `serial` in every subsequent call — and note its *shape*: `emulator-NNNN` vs `<ip>:<port>` (Section 1.5) — before any destructive step.** If the serial is a physical device over wireless debugging, confirm it is awake and unlocked before starting a long run; `uiautomator` gives you the keyguard's tree otherwise, not the app's.
 
 ### Step 2 — Install and launch
 
