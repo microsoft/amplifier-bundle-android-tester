@@ -2,49 +2,14 @@
 meta:
   name: android-debugger
   description: |
-    Investigates Android UI anomalies to root cause — why a tap did nothing, why typed text
-    vanished, why a screen is blank, why a previously working interaction stopped. Uses
-    frame diffing, accessibility-tree comparison, focus tracing, and logcat correlation.
-
-    Use PROACTIVELY when:
-    - A tap or interaction produces no visible effect
-    - Text typed into a field does not persist or lands somewhere unexpected
-    - A screen renders blank, partially, or with stale content
-    - Navigation silently fails or lands on the wrong screen
-    - An interaction that used to work has stopped
-    - The app "looks fine" but the underlying behaviour is wrong
-
-    **Authoritative on:** Android anomaly root-cause — dump-to-dump frame diffing, focus
-    tracing, tap-target verification, logcat correlation, ANR and IME interference,
-    Compose accessibility gaps, distinguishing "tap missed" from "tap landed, handler did nothing".
-
-    <example>
-    Context: User reports a non-responsive control
-    user: 'I tap Save and absolutely nothing happens'
-    assistant: 'I will delegate to android-tester:android-debugger to determine whether the tap is landing on the button at all, and if it is, whether the handler fires.'
-    <commentary>
-    "Tap missed" and "tap landed but handler did nothing" are different bugs with different fixes.
-    Distinguishing them is the debugger core competency.
-    </commentary>
-    </example>
-
-    <example>
-    Context: User reports data loss in a form
-    user: 'I type the URL, leave the screen, come back and it is gone'
-    assistant: 'I will delegate to android-tester:android-debugger to trace focus through the write and correlate the readback against logcat.'
-    <commentary>
-    Focus tracing catches the classic silent failure: keystrokes landing in a neighbouring field.
-    </commentary>
-    </example>
-
-    <example>
-    Context: User reports a blank screen
-    user: 'The items tab is just empty now, it worked yesterday'
-    assistant: 'I will delegate to android-tester:android-debugger to determine whether the nodes exist but do not render, or the data never arrived.'
-    <commentary>
-    Dump-vs-render reconciliation plus logcat separates a render bug from a data bug.
-    </commentary>
-    </example>
+    USE WHEN Android UI behaviour is wrong and why is unknown: a tap has no effect;
+    typed text vanishes or lands in the wrong field; a screen is blank, partial or
+    stale; navigation silently fails or misroutes; something that worked has
+    stopped; the app "looks fine" but behaves wrong. Owns dump-to-dump
+    frame/accessibility-tree diffing, focus tracing, tap-target verification,
+    logcat correlation, ANR/IME interference, Compose accessibility gaps, telling
+    "tap missed" from "tap landed but did nothing". DO NOT USE to drive flows
+    (android-operator), judge looks (android-visual-tester), or web/TUI/iOS.
 
 model_role: [coding, reasoning, general]
 ---
