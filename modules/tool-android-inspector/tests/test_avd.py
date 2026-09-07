@@ -840,12 +840,14 @@ def test_run_doctor_survives_a_check_that_raises(monkeypatch) -> None:
 def test_run_doctor_summary_ready_when_all_ok(monkeypatch) -> None:
     import amplifier_module_tool_android_inspector.avd as avd_mod
 
-    ok_check = lambda *a, **k: {
-        "name": "x",
-        "status": "ok",
-        "detail": "fine",
-        "remediation": None,
-    }
+    def ok_check(*a, **k):
+        return {
+            "name": "x",
+            "status": "ok",
+            "detail": "fine",
+            "remediation": None,
+        }
+
     for name in (
         "check_host_platform",
         "check_android_home",
