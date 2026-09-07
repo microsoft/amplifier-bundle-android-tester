@@ -1,0 +1,38 @@
+# RED -- the lean-head guardrail run against STOCK (origin/main @ fbf8ce6)
+#
+# method: git archive fbf8ce6 -> temp tree; copy the branch's tests/test_lean_head_surface.py,
+#         tests/lean_head_inventory.py and tests/fixtures/lean-head/ into it; run there.
+#   cd <stock>/modules/tool-android-inspector && uv run --extra dev pytest tests/test_lean_head_surface.py -q
+#
+# 9 of 14 fail against stock -- the budgets, the per-parameter ceiling, the byte pins and
+# both fidelity probes. A budget nothing fails is not a ratchet.
+
+E       AssertionError: tool description is 3619 chars, over its pinned lean budget of 3044 (+575).
+E       assert 3619 <= 3044
+E       AssertionError: parameter descriptions total 3398 chars, over 3293.
+E       assert 3398 <= 3293
+E       AssertionError: serialized tool definition is 9097 chars, over 8417.
+E       assert 9097 <= 8417
+E       AssertionError: android-awareness.md is 3413 chars, over 2787.
+E       assert 3413 <= 2787
+E           AssertionError: port grew to 799 (> 710)
+E           assert 799 <= 710
+E       AssertionError: tool contracts lost from the lean surface:
+E       assert ["T-12: 'nami... taken'", ...] == []
+E       AssertionError: awareness contracts lost:
+E       assert ["A-14: 'boot...ions an AVD'"] == []
+E       AssertionError: assert 'Drive and in...g candidates.' == 'Drive and in...g candidates.'
+E       AssertionError: assert '# Android Te...orkarounds.\n' == '# Android Te...workaround.\n'
+
+tests/test_lean_head_surface.py:253: AssertionError
+=========================== short test summary info ============================
+FAILED tests/test_lean_head_surface.py::test_description_within_budget - Asse...
+FAILED tests/test_lean_head_surface.py::test_param_descriptions_within_budget
+FAILED tests/test_lean_head_surface.py::test_serialized_surface_within_budget
+FAILED tests/test_lean_head_surface.py::test_awareness_within_budget - Assert...
+FAILED tests/test_lean_head_surface.py::test_only_a_named_parameter_contract_exceeds_the_ceiling
+FAILED tests/test_lean_head_surface.py::test_every_stock_tool_contract_survives
+FAILED tests/test_lean_head_surface.py::test_every_stock_awareness_contract_survives
+FAILED tests/test_lean_head_surface.py::test_description_is_byte_identical_to_the_pinned_text
+FAILED tests/test_lean_head_surface.py::test_awareness_is_byte_identical_to_the_pinned_text
+9 failed, 5 passed in 0.05s

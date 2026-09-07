@@ -1,0 +1,23 @@
+########## STOCK (origin/main @ fbf8ce6) ##########
+repo: /tmp/hd-stock-fbf8ce6-E6I6
+recipe: /home/bkrabach/.amplifier/cache/skills/amplifier-foundation-c909465861f9d6ce/recipes/validate-agents.yaml (v1.8.0)
+agents discovered: 3
+structural summary: {'total': 3, 'passed': 3, 'errors': 0, 'warnings': 3}
+quality_level: needs_work
+quality summary: {'total': 3, 'good': 0, 'polish': 0, 'needs_work': 3, 'critical': 0}
+  android-debugger         chars=  598 examples=0 commentary=0 errors=[] warnings=['NO_TOOLS_SECTION']
+  android-operator         chars=  594 examples=0 commentary=0 errors=[] warnings=['NO_TOOLS_SECTION']
+  android-visual-tester    chars=  600 examples=0 commentary=0 errors=[] warnings=['NO_TOOLS_SECTION']
+VERDICT: structural errors=0 -> PASS
+
+########## BRANCH (lane/hd-android-inspector) ##########
+repo: /home/bkrabach/dev/hw-model-performance/lanes/hd-android-inspector/amplifier-bundle-android-tester
+recipe: /home/bkrabach/.amplifier/cache/skills/amplifier-foundation-c909465861f9d6ce/recipes/validate-agents.yaml (v1.8.0)
+agents discovered: 3
+structural summary: {'total': 3, 'passed': 3, 'errors': 0, 'warnings': 3}
+quality_level: needs_work
+quality summary: {'total': 3, 'good': 0, 'polish': 0, 'needs_work': 3, 'critical': 0}
+  android-debugger         chars=  598 examples=0 commentary=0 errors=[] warnings=['NO_TOOLS_SECTION']
+  android-operator         chars=  594 examples=0 commentary=0 errors=[] warnings=['NO_TOOLS_SECTION']
+  android-visual-tester    chars=  600 examples=0 commentary=0 errors=[] warnings=['NO_TOOLS_SECTION']
+VERDICT: structural errors=0 -> PASS

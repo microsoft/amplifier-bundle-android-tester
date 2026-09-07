@@ -1,0 +1,8 @@
+# GREEN -- lean-head guardrail on this branch
+# cd modules/tool-android-inspector && uv run --no-sync pytest tests/test_lean_head_surface.py -q
+..............                                                           [100%]
+14 passed in 0.01s
+
+# full module suite
+..........................................................               [100%]
+346 passed in 6.91s

@@ -1,0 +1,34 @@
+Drive and inspect Android apps on an adb-reachable device or emulator.
+
+uiautomator is the sensor: every interaction resolves a selector against the live accessibility tree before acting. Screenshots are for visual judgment only, never for computing tap coordinates.
+
+Device & emulator lifecycle:
+- list_devices: enumerate attached devices; errors on ambiguity (>1 ready device, no explicit serial)
+- start_emulator: boot an AVD (avd, port) with host workarounds, returns serial. Fast-fails if the AVD is missing (see 'avd'); allocates a port if none is given (see 'port'). Takes an exclusive cross-process lease on the AVD first -- refuses at once if another live process has it booted, naming the owning pid/port/duration (give each unrelated session its own AVD; see create_avd)
+- stop_emulator: kill the emulator and reap its process. Refuses unless a live AVD lease for that serial is owned by the calling session -- names the owning pid rather than silently killing someone else's emulator (override: see 'force')
+- doctor: host readiness report (ANDROID_HOME, adb, emulator binary, KVM, ptrace_scope/gdb, AVDs, cmdline-tools) -- every check runs even if an earlier one fails; never errors, always returns a report
+- create_avd: provision an AVD from an installed or sdkmanager-installable system image; never clobbers an existing AVD (see 'force') or silently accepts SDK licenses (see 'accept_licenses')
+
+App lifecycle:
+- install: adb install -r -g (reinstall, grant all runtime perms)
+- launch: by 'component' (most deterministic) or 'package' (resolve, then monkey) -- see those parameters. Confirms arrival by polling mCurrentFocus for the target package -- never reports success on exit code alone
+- stop_app: am force-stop
+
+Sensing:
+- screenshot: writes a PNG to disk, returns image_path (never inline base64), geometry, byte size
+- ui_dump: parsed node list (class, text, content_desc, resource_id, bounds, center, focused, clickable, enabled) -- not raw XML
+- find: nodes matching a selector, with resolved centers; does not error on 0 or >1 matches
+- logcat: tail, filtered by tag (see 'filter_spec') and/or by running package (see 'package')
+
+Interacting -- selector-first:
+- tap: dump -> resolve selector -> tap center -> re-dump -> report what changed
+- type_text: tap -> assert focus -> MOVE_END + N*DEL -> input text -> BACK -> re-dump -> assert readback
+- key: keyevent by name (e.g. 'BACK') or numeric code
+- swipe: explicit coordinates (gestures have no selector analogue)
+- tap_xy: RAW coordinates, no selector resolution -- always returns a warning
+
+Synchronising:
+- wait_for: polls ui_dump until a selector appears/disappears, or timeout -- no bare sleeps
+- dismiss_anr: detect/dismiss an ANR ('...isn't responding') dialog; never auto-dismissed silently by other operations
+
+Selector: {"text": "Save"} | {"res_id": "com.foo:id/save"} | {"desc": "Home"} | {"class": "EditText", "index": 0} | {"text_contains": "poll"}. Multiple keys AND together. An ambiguous match (>1 node, no index) is an error listing candidates.

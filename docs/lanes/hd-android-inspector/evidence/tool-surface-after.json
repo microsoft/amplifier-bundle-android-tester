@@ -1,0 +1,163 @@
+{
+  "name": "android_inspector",
+  "description": "Drive and inspect Android apps on an adb-reachable device or emulator.\n\nuiautomator is the sensor: every interaction resolves a selector against the live accessibility tree before acting. Screenshots are for visual judgment only, never for computing tap coordinates.\n\nDevice & emulator lifecycle:\n- list_devices: enumerate attached devices; errors on ambiguity (>1 ready device, no explicit serial)\n- start_emulator: boot an AVD (avd, port) with host workarounds, returns serial. Fast-fails if the AVD is missing (see 'avd'); allocates a port if none is given (see 'port'). Takes an exclusive cross-process lease on the AVD first -- refuses at once if another live process has it booted, naming the owning pid/port/duration (give each unrelated session its own AVD; see create_avd)\n- stop_emulator: kill the emulator and reap its process. Refuses unless a live AVD lease for that serial is owned by the calling session -- names the owning pid rather than silently killing someone else's emulator (override: see 'force')\n- doctor: host readiness report (ANDROID_HOME, adb, emulator binary, KVM, ptrace_scope/gdb, AVDs, cmdline-tools) -- every check runs even if an earlier one fails; never errors, always returns a report\n- create_avd: provision an AVD from an installed or sdkmanager-installable system image; never clobbers an existing AVD (see 'force') or silently accepts SDK licenses (see 'accept_licenses')\n\nApp lifecycle:\n- install: adb install -r -g (reinstall, grant all runtime perms)\n- launch: by 'component' (most deterministic) or 'package' (resolve, then monkey) -- see those parameters. Confirms arrival by polling mCurrentFocus for the target package -- never reports success on exit code alone\n- stop_app: am force-stop\n\nSensing:\n- screenshot: writes a PNG to disk, returns image_path (never inline base64), geometry, byte size\n- ui_dump: parsed node list (class, text, content_desc, resource_id, bounds, center, focused, clickable, enabled) -- not raw XML\n- find: nodes matching a selector, with resolved centers; does not error on 0 or >1 matches\n- logcat: tail, filtered by tag (see 'filter_spec') and/or by running package (see 'package')\n\nInteracting -- selector-first:\n- tap: dump -> resolve selector -> tap center -> re-dump -> report what changed\n- type_text: tap -> assert focus -> MOVE_END + N*DEL -> input text -> BACK -> re-dump -> assert readback\n- key: keyevent by name (e.g. 'BACK') or numeric code\n- swipe: explicit coordinates (gestures have no selector analogue)\n- tap_xy: RAW coordinates, no selector resolution -- always returns a warning\n\nSynchronising:\n- wait_for: polls ui_dump until a selector appears/disappears, or timeout -- no bare sleeps\n- dismiss_anr: detect/dismiss an ANR ('...isn't responding') dialog; never auto-dismissed silently by other operations\n\nSelector: {\"text\": \"Save\"} | {\"res_id\": \"com.foo:id/save\"} | {\"desc\": \"Home\"} | {\"class\": \"EditText\", \"index\": 0} | {\"text_contains\": \"poll\"}. Multiple keys AND together. An ambiguous match (>1 node, no index) is an error listing candidates.",
+  "input_schema": {
+    "type": "object",
+    "properties": {
+      "operation": {
+        "type": "string",
+        "enum": [
+          "list_devices",
+          "start_emulator",
+          "stop_emulator",
+          "doctor",
+          "create_avd",
+          "install",
+          "launch",
+          "stop_app",
+          "screenshot",
+          "ui_dump",
+          "find",
+          "logcat",
+          "tap",
+          "tap_xy",
+          "type_text",
+          "key",
+          "swipe",
+          "wait_for",
+          "dismiss_anr"
+        ],
+        "description": "Operation to perform"
+      },
+      "serial": {
+        "type": "string",
+        "description": "Device serial. If omitted, auto-resolved: uses the single ready device, or errors if zero/ambiguous."
+      },
+      "avd": {
+        "type": "string",
+        "description": "AVD name to boot (start_emulator). Must already exist -- fast-fails immediately (no 60s timeout) if not, naming the AVDs that do exist and the avdmanager remediation command. See 'doctor' and 'create_avd'. Not 'name' (create_avd's new-AVD name)."
+      },
+      "port": {
+        "type": "integer",
+        "description": "Emulator console port (start_emulator). Must be even and in the 5554-5682 range adb scans for emulator consoles -- the emulator uses 'port' for its console and 'port + 1' for adb. Invalid values are rejected before launch, never silently ignored or adjusted. Given: waits on the deterministic serial 'emulator-<port>' rather than 'any new serial', refusing to launch if that serial is already attached to another device/emulator. Omitted: a free port is allocated atomically (lowest free even port in range, skipping ports already attached in adb devices or recorded on another live AVD lease), falling back to 'any new serial' only if every port is taken -- named in the result via 'port_allocation_fallback'."
+      },
+      "name": {
+        "type": "string",
+        "description": "New AVD name to create (create_avd)."
+      },
+      "api_level": {
+        "type": "integer",
+        "default": 35,
+        "description": "Android API level for the system image (create_avd)"
+      },
+      "tag": {
+        "type": "string",
+        "default": "google_apis",
+        "description": "System image tag, e.g. 'google_apis', 'google_apis_playstore' (create_avd)"
+      },
+      "abi": {
+        "type": "string",
+        "description": "System image ABI (create_avd), e.g. 'arm64-v8a', 'x86_64'. Defaults to the host's native ABI (arm64-v8a on aarch64, x86_64 otherwise) -- detected, never hardcoded; override only for a non-native ABI."
+      },
+      "device": {
+        "type": "string",
+        "default": "pixel_6",
+        "description": "avdmanager device profile, e.g. 'pixel_6' (create_avd)"
+      },
+      "accept_licenses": {
+        "type": "boolean",
+        "default": false,
+        "description": "create_avd: auto-accept sdkmanager SDK licenses when the system image isn't installed. False (default) fails loud instead of silently accepting licenses on your behalf."
+      },
+      "force": {
+        "type": "boolean",
+        "default": false,
+        "description": "create_avd: overwrite an existing AVD of the same name; without it, create_avd errors rather than silently clobbering one.\nstop_emulator: stop a serial whose AVD lease is held by a DIFFERENT live process (or has no lease record at all); without it, stop_emulator refuses and names the owning pid. Used cross-owner, the result always carries a prominent 'warning' field naming whose emulator was killed -- never silent."
+      },
+      "apk_path": {
+        "type": "string",
+        "description": "Path to a .apk (install)"
+      },
+      "package": {
+        "type": "string",
+        "description": "Package name (launch, stop_app, logcat). launch: resolves the launcher activity via 'cmd package resolve-activity', falling back to 'monkey -c LAUNCHER' only if that yields nothing. logcat: resolves the package's running pid(s) (pidof, else 'ps -A') and scopes output via --pid, composing with 'filter_spec' rather than overriding it; errors by name -- never an empty result -- if the package has no running process."
+      },
+      "component": {
+        "type": "string",
+        "description": "ComponentName pkg/.Activity (launch). Used directly with 'am start -n' -- no resolve/monkey fallback, so the most deterministic path. Preferred over 'package' when known."
+      },
+      "selector": {
+        "type": "object",
+        "description": "Selector dict: text, text_contains, res_id, desc, class, optional index to disambiguate"
+      },
+      "text": {
+        "type": "string",
+        "description": "Text to type (type_text)"
+      },
+      "x": {
+        "type": "integer",
+        "description": "Raw X coordinate (tap_xy)"
+      },
+      "y": {
+        "type": "integer",
+        "description": "Raw Y coordinate (tap_xy)"
+      },
+      "x1": {
+        "type": "integer",
+        "description": "Swipe start X"
+      },
+      "y1": {
+        "type": "integer",
+        "description": "Swipe start Y"
+      },
+      "x2": {
+        "type": "integer",
+        "description": "Swipe end X"
+      },
+      "y2": {
+        "type": "integer",
+        "description": "Swipe end Y"
+      },
+      "duration_ms": {
+        "type": "integer",
+        "default": 300,
+        "description": "Swipe duration in milliseconds"
+      },
+      "keycode": {
+        "description": "Keyevent name (e.g. 'BACK') or numeric code (key op)"
+      },
+      "timeout_s": {
+        "type": "number",
+        "default": 10.0,
+        "description": "Timeout in seconds (wait_for; launch arrival-confirmation poll of mCurrentFocus)"
+      },
+      "poll_s": {
+        "type": "number",
+        "default": 1.0,
+        "description": "Poll interval in seconds (wait_for)"
+      },
+      "absent": {
+        "type": "boolean",
+        "default": false,
+        "description": "wait_for succeeds when the selector disappears, not appears"
+      },
+      "all_nodes": {
+        "type": "boolean",
+        "default": false,
+        "description": "ui_dump: include all nodes, not just those with text/desc/res-id"
+      },
+      "lines": {
+        "type": "integer",
+        "default": 200,
+        "description": "logcat: number of trailing lines to dump"
+      },
+      "filter_spec": {
+        "type": "string",
+        "description": "logcat: filter spec, e.g. 'MyTag:D *:S'"
+      }
+    },
+    "required": [
+      "operation"
+    ]
+  }
+}
