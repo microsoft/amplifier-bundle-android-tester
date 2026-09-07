@@ -1,12 +1,11 @@
 ---
 name: android-self-hosted-publishing
 description: |
-  Load-bearing rules for shipping Android builds to testers without a store — a signed
-  APK plus a signed manifest sidecar, versionCode monotonicity enforcement, HTTPS-first
-  with a TLS-only HTTP fallback, and proving the installed build is the one you just made.
-  Use when building, reviewing, or debugging a self-hosted update rail for an Android app
-  under test, or when a device bug report needs its first question answered: is the code
-  fix actually on the device?
+  Use when building, reviewing, or debugging a self-hosted Android update rail — shipping
+  builds to testers without a store — or when a device bug report needs its first question
+  answered: is the fix actually on the device? Covers signed APK plus signed manifest
+  sidecar, versionCode monotonicity enforcement, HTTPS-first with a TLS-only HTTP
+  fallback, and installed-build verification.
 version: 1.0.0
 license: MIT
 ---

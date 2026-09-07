@@ -2,50 +2,14 @@
 meta:
   name: android-operator
   description: |
-    Drives Android applications on emulators and physical devices — boots the emulator,
-    installs the APK, launches the app, interacts via the accessibility tree, and verifies
-    that the resulting UI and data are real.
-
-    Use PROACTIVELY when the user needs to:
-    - Install and launch an Android app on an emulator or device
-    - Exercise a UI flow (navigation, forms, settings, tabs) and verify it works
-    - Confirm an Android fix actually landed on the screen, not just in the tests
-    - Configure an app's settings over adb and prove the values took
-    - Capture evidence that an Android screen shows real data, not an empty shell
-
-    **Authoritative on:** drive-and-verify on Android — emulator boot lifecycle,
-    APK install/launch, `ui_dump` selector resolution, the verified field-write protocol,
-    `wait_for` synchronisation, logcat correlation, adb serial safety.
-
-    <example>
-    Context: User fixed an Android settings screen and wants it verified
-    user: 'I fixed the Base URL field not saving — can you confirm it works now?'
-    assistant: 'I will delegate to android-tester:android-operator to boot the emulator, install the APK, retype the field with the verified write protocol, and assert the readback.'
-    <commentary>
-    Field entry on Android is the highest-risk operation — the operator has the focus-assertion
-    and readback protocol that catches silent wrong-field writes.
-    </commentary>
-    </example>
-
-    <example>
-    Context: User wants an end-to-end walkthrough of an app
-    user: 'Install the APK on the emulator and walk every tab, tell me what works'
-    assistant: 'I will delegate to android-tester:android-operator to boot, install, and exercise each tab with dump-verified navigation.'
-    <commentary>
-    Boot-to-verify is the operator core workflow. It also owns the aarch64 host workarounds
-    that make the boot succeed at all.
-    </commentary>
-    </example>
-
-    <example>
-    Context: User is unsure whether a screen is showing live data
-    user: 'The items list looks populated but I do not trust it — is that real data?'
-    assistant: 'I will delegate to android-tester:android-operator to correlate the screen against logcat and the server log before calling it real.'
-    <commentary>
-    A screenshot alone never proves data is live. The operator carries the independent-confirmation
-    discipline.
-    </commentary>
-    </example>
+    USE WHEN an Android app must be driven and verified on an emulator or device:
+    install/launch an APK; exercise a UI flow (navigation, forms, settings, tabs);
+    confirm a fix landed on screen, not just in tests; write app settings over adb
+    and prove they took; show a screen has real data, not an empty shell. Owns
+    emulator boot, `ui_dump` selector resolution, the verified field-write
+    protocol, `wait_for` sync, logcat correlation, adb serial safety, aarch64 host
+    workarounds. DO NOT USE for web, TUI/CLI, iOS or Amplifier, visual review
+    (android-visual-tester), or root-cause (android-debugger).
 
 model_role: [coding, general]
 ---

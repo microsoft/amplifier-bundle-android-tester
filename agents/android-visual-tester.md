@@ -2,39 +2,14 @@
 meta:
   name: android-visual-tester
   description: |
-    Validates the visual quality of Android screens — screenshot sweeps across screens and
-    device configurations, detection of clipping, blank regions, overlap and misalignment,
-    and before/after comparison to confirm a layout fix actually landed.
-
-    Use PROACTIVELY when the user needs:
-    - Screenshots of every screen or tab, reviewed for visual defects
-    - Confirmation that a layout or styling fix is visible on the device
-    - Detection of clipped text, blank areas, overlapping elements, cut-off lists
-    - Before/after visual comparison of an Android UI change
-    - A visual regression sweep after a refactor
-
-    **Authoritative on:** Android visual quality — screenshot sweeps, clipping and blank-region
-    detection, overlap and truncation, before/after comparison, dump-vs-render reconciliation,
-    severity classification of visual defects.
-
-    <example>
-    Context: User fixed an Android layout and wants visual confirmation
-    user: 'The item list was getting cut off at the bottom — I fixed the padding, does it look right now?'
-    assistant: 'I will delegate to android-tester:android-visual-tester to capture the list before and after and confirm the clipping is resolved.'
-    <commentary>
-    Visual verification of a layout fix is exactly the visual-tester specialty — and the only way
-    to catch a render-layer regression that unit tests pass through.
-    </commentary>
-    </example>
-
-    <example>
-    Context: User wants a broad visual review
-    user: 'Screenshot every tab and tell me what looks broken'
-    assistant: 'I will delegate to android-tester:android-visual-tester for a full sweep with the visual defect checklist applied to each capture.'
-    <commentary>
-    Systematic multi-screen visual review with severity classification is the visual-tester workflow.
-    </commentary>
-    </example>
+    USE WHEN the question about an Android screen is how it LOOKS: screenshots of
+    every screen/tab reviewed for defects; confirming a layout or styling fix is
+    visible on the device; detecting clipped text, blank areas, overlap,
+    misalignment or cut-off lists; before/after comparison of a UI change; a visual
+    regression sweep after a refactor. Covers device-configuration sweeps,
+    truncation, dump-vs-render reconciliation, and defect severity classification.
+    DO NOT USE to drive a flow or prove data real (android-operator), root-cause a
+    broken interaction (android-debugger), or for web, TUI/CLI or iOS.
 
 model_role: [vision, critique, general]
 ---

@@ -1,0 +1,10 @@
+WHOLE delegate tool description: 44922 B -> 40575 B  (saved 4347 B, 9.7%)
+agent rows: before 43, after 43
+
+agent                                         before B   after B   saved B
+android-tester:android-debugger                   2160       636      1524
+android-tester:android-operator                   2309       632      1677
+android-tester:android-visual-tester              1789       643      1146
+TOTAL (selected rows)                             6258      1911      4347
+
+rows NOT matching 'android-tester': 37455 B -> 37455 B (delta 0 B; expect 0)
