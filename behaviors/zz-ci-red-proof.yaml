@@ -1,0 +1,3 @@
+bundle:
+  name: zz-ci-red-proof
+  this line: is: malformed: on purpose
