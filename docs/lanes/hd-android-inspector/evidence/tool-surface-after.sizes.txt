@@ -1,0 +1,1 @@
+serialized_tool_definition_chars=8417 description_chars=3044 param_description_chars=3293 param_count=30 prose_total_chars=6337

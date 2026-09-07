@@ -101,6 +101,41 @@ _OPERATIONS = (
     "dismiss_anr",
 )
 
+_DESCRIPTION = """Drive and inspect Android apps on an adb-reachable device or emulator.
+
+uiautomator is the sensor: every interaction resolves a selector against the live accessibility tree before acting. Screenshots are for visual judgment only, never for computing tap coordinates.
+
+Device & emulator lifecycle:
+- list_devices: enumerate attached devices; errors on ambiguity (>1 ready device, no explicit serial)
+- start_emulator: boot an AVD (avd, port) with host workarounds, returns serial. Fast-fails if the AVD is missing (see 'avd'); allocates a port if none is given (see 'port'). Takes an exclusive cross-process lease on the AVD first -- refuses at once if another live process has it booted, naming the owning pid/port/duration (give each unrelated session its own AVD; see create_avd)
+- stop_emulator: kill the emulator and reap its process. Refuses unless a live AVD lease for that serial is owned by the calling session -- names the owning pid rather than silently killing someone else's emulator (override: see 'force')
+- doctor: host readiness report (ANDROID_HOME, adb, emulator binary, KVM, ptrace_scope/gdb, AVDs, cmdline-tools) -- every check runs even if an earlier one fails; never errors, always returns a report
+- create_avd: provision an AVD from an installed or sdkmanager-installable system image; never clobbers an existing AVD (see 'force') or silently accepts SDK licenses (see 'accept_licenses')
+
+App lifecycle:
+- install: adb install -r -g (reinstall, grant all runtime perms)
+- launch: by 'component' (most deterministic) or 'package' (resolve, then monkey) -- see those parameters. Confirms arrival by polling mCurrentFocus for the target package -- never reports success on exit code alone
+- stop_app: am force-stop
+
+Sensing:
+- screenshot: writes a PNG to disk, returns image_path (never inline base64), geometry, byte size
+- ui_dump: parsed node list (class, text, content_desc, resource_id, bounds, center, focused, clickable, enabled) -- not raw XML
+- find: nodes matching a selector, with resolved centers; does not error on 0 or >1 matches
+- logcat: tail, filtered by tag (see 'filter_spec') and/or by running package (see 'package')
+
+Interacting -- selector-first:
+- tap: dump -> resolve selector -> tap center -> re-dump -> report what changed
+- type_text: tap -> assert focus -> MOVE_END + N*DEL -> input text -> BACK -> re-dump -> assert readback
+- key: keyevent by name (e.g. 'BACK') or numeric code
+- swipe: explicit coordinates (gestures have no selector analogue)
+- tap_xy: RAW coordinates, no selector resolution -- always returns a warning
+
+Synchronising:
+- wait_for: polls ui_dump until a selector appears/disappears, or timeout -- no bare sleeps
+- dismiss_anr: detect/dismiss an ANR ('...isn't responding') dialog; never auto-dismissed silently by other operations
+
+Selector: {"text": "Save"} | {"res_id": "com.foo:id/save"} | {"desc": "Home"} | {"class": "EditText", "index": 0} | {"text_contains": "poll"}. Multiple keys AND together. An ambiguous match (>1 node, no index) is an error listing candidates."""
+
 MIN_SCREENSHOT_BYTES = 1024  # a real screencap PNG is always far larger; anything less is a liveness failure
 
 _LAUNCH_FOCUS_TIMEOUT_S = 10.0  # default for the arrival-confirmation poll in `launch`
@@ -206,70 +241,7 @@ class AndroidInspectorTool:
 
     @property
     def description(self) -> str:
-        return (
-            "Drive and inspect Android apps on an adb-reachable device or emulator.\n\n"
-            "uiautomator is the sensor — every interaction resolves a selector against the "
-            "live accessibility tree before acting. Screenshots are for visual judgment "
-            "only, never for computing tap coordinates.\n\n"
-            "Device & emulator lifecycle:\n"
-            "- list_devices: enumerate attached devices; errors on ambiguity (>1 ready "
-            "device, no explicit serial)\n"
-            "- start_emulator: boot an AVD (avd, port), applying host workarounds, "
-            "returns serial. Fast-fails immediately (no 60s timeout) if the AVD does "
-            "not exist, naming existing AVDs and the avdmanager remediation command. "
-            "Acquires an exclusive, cross-process lease on 'avd' first -- refuses "
-            "immediately if another live process already has it booted, naming the "
-            "owning pid/port/duration (each unrelated session should use its own AVD; "
-            "see create_avd). Without an explicit port, allocates one atomically "
-            "(skipping ports already attached or leased elsewhere); result carries "
-            "port_allocation_fallback if allocation was impossible\n"
-            "- stop_emulator: kill the emulator and reap its process. Refuses unless "
-            "a live AVD lease for that serial is owned by the calling session -- "
-            "names the owning pid rather than silently killing someone else's "
-            "emulator. 'force': true overrides, but the result always carries a "
-            "prominent 'warning' naming whose emulator was killed\n"
-            "- doctor: full host readiness report (ANDROID_HOME, adb, emulator binary, "
-            "KVM, ptrace_scope/gdb, AVDs, cmdline-tools) -- every check runs even if "
-            "an earlier one fails; never errors, always returns a report\n"
-            "- create_avd: provision a new AVD from an installed or "
-            "sdkmanager-installable system image; never clobbers an existing AVD or "
-            "silently accepts SDK licenses\n\n"
-            "App lifecycle:\n"
-            "- install: adb install -r -g (reinstall, grant all runtime perms)\n"
-            "- launch: component -> am start directly (most deterministic); package -> "
-            "resolve launcher activity via 'cmd package resolve-activity', am start; "
-            "monkey -c LAUNCHER only if resolution yields nothing. Confirms arrival by "
-            "polling mCurrentFocus for the target package before reporting success — "
-            "never reports success on exit code alone\n"
-            "- stop_app: am force-stop\n\n"
-            "Sensing:\n"
-            "- screenshot: writes a PNG to disk, returns image_path (never inline base64), "
-            "geometry, byte size\n"
-            "- ui_dump: parsed node list (class, text, content_desc, resource_id, bounds, "
-            "center, focused, clickable, enabled) — not raw XML\n"
-            "- find: nodes matching a selector, with resolved centers (does not error on "
-            "0 or >1 matches)\n"
-            "- logcat: tail/filter by tag ('filter_spec') and/or by 'package' (resolved "
-            "to running pid(s) via pidof/ps, scoped with --pid; composes with "
-            "filter_spec rather than overriding it; errors by name if the package isn't "
-            "running, instead of returning an empty result)\n\n"
-            "Interacting — selector-first:\n"
-            "- tap: dump -> resolve selector -> tap center -> re-dump -> report what changed\n"
-            "- type_text: tap -> assert focus -> MOVE_END + N*DEL -> input text -> BACK -> "
-            "re-dump -> assert readback\n"
-            "- key: keyevent by name (e.g. 'BACK') or numeric code\n"
-            "- swipe: explicit coordinates (gestures have no selector analogue)\n"
-            "- tap_xy: RAW coordinates, no selector resolution — always returns a warning\n\n"
-            "Synchronising:\n"
-            "- wait_for: polls ui_dump until a selector appears/disappears, or timeout — "
-            "no bare sleeps\n"
-            "- dismiss_anr: detect/dismiss an ANR ('...isn't responding') dialog; never "
-            "auto-dismissed silently by other operations\n\n"
-            'Selector: {"text": "Save"} | {"res_id": "com.foo:id/save"} | '
-            '{"desc": "Home"} | {"class": "EditText", "index": 0} | '
-            '{"text_contains": "poll"}. Multiple keys AND together. An ambiguous match '
-            "(>1 node, no index) is an error listing candidates."
-        )
+        return _DESCRIPTION
 
     @property
     def input_schema(self) -> dict[str, Any]:
@@ -292,29 +264,27 @@ class AndroidInspectorTool:
                     "type": "string",
                     "description": (
                         "AVD name to boot (start_emulator). Must already exist -- "
-                        "fast-fails immediately (no 60s timeout) if not. See 'doctor' "
-                        "and 'create_avd' to provision one. Not the same as 'name' "
-                        "(create_avd's new-AVD name)."
+                        "fast-fails immediately (no 60s timeout) if not, naming the AVDs "
+                        "that do exist and the avdmanager remediation command. See "
+                        "'doctor' and 'create_avd'. Not 'name' (create_avd's new-AVD "
+                        "name)."
                     ),
                 },
                 "port": {
                     "type": "integer",
                     "description": (
-                        "Emulator console port (start_emulator). Must be even and "
-                        "in the 5554-5682 range adb scans for emulator consoles -- "
-                        "the emulator uses 'port' for its console and 'port + 1' "
-                        "for adb. Invalid values are rejected before anything is "
-                        "launched -- never silently ignored or adjusted. When "
-                        "given, start_emulator waits on the deterministic serial "
-                        "'emulator-<port>' rather than 'any new serial', and "
-                        "refuses to launch if that serial is already attached to "
-                        "another device/emulator. When OMITTED, a free port is "
-                        "allocated atomically (lowest free even port in range, "
-                        "skipping ports already attached in adb devices or "
-                        "recorded on another live AVD lease) -- only falls back "
-                        "to waiting for 'any new serial' if every port in range "
-                        "is taken, and the result names that fallback explicitly "
-                        "via 'port_allocation_fallback'."
+                        "Emulator console port (start_emulator). Must be even and in the "
+                        "5554-5682 range adb scans for emulator consoles -- the emulator "
+                        "uses 'port' for its console and 'port + 1' for adb. Invalid "
+                        "values are rejected before launch, never silently ignored or "
+                        "adjusted. Given: waits on the deterministic serial "
+                        "'emulator-<port>' rather than 'any new serial', refusing to "
+                        "launch if that serial is already attached to another "
+                        "device/emulator. Omitted: a free port is allocated atomically "
+                        "(lowest free even port in range, skipping ports already "
+                        "attached in adb devices or recorded on another live AVD "
+                        "lease), falling back to 'any new serial' only if every port is "
+                        "taken -- named in the result via 'port_allocation_fallback'."
                     ),
                 },
                 "name": {
@@ -337,10 +307,10 @@ class AndroidInspectorTool:
                 "abi": {
                     "type": "string",
                     "description": (
-                        "System image ABI, e.g. 'arm64-v8a', 'x86_64' (create_avd). "
+                        "System image ABI (create_avd), e.g. 'arm64-v8a', 'x86_64'. "
                         "Defaults to the host's native ABI (arm64-v8a on aarch64, "
-                        "x86_64 otherwise) -- detected, never hardcoded. Override "
-                        "only to request a non-native ABI."
+                        "x86_64 otherwise) -- detected, never hardcoded; override "
+                        "only for a non-native ABI."
                     ),
                 },
                 "device": {
@@ -352,24 +322,24 @@ class AndroidInspectorTool:
                     "type": "boolean",
                     "default": False,
                     "description": (
-                        "create_avd: auto-accept sdkmanager SDK licenses when the "
-                        "system image isn't already installed. False (default) fails "
-                        "loud instead of silently accepting licenses on your behalf."
+                        "create_avd: auto-accept sdkmanager SDK licenses when the system "
+                        "image isn't installed. False (default) fails loud instead of "
+                        "silently accepting licenses on your behalf."
                     ),
                 },
                 "force": {
                     "type": "boolean",
                     "default": False,
                     "description": (
-                        "create_avd: overwrite an existing AVD of the same name. "
-                        "Without this, create_avd errors rather than silently "
-                        "clobbering an existing AVD.\n"
-                        "stop_emulator: stop a serial even though its AVD lease is "
-                        "held by a DIFFERENT live process (or has no lease record "
-                        "at all). Without this, stop_emulator refuses and names "
-                        "the owning pid. When used cross-owner, the result always "
-                        "carries a prominent 'warning' field naming whose "
-                        "emulator was killed -- never silent."
+                        "create_avd: overwrite an existing AVD of the same name; "
+                        "without it, create_avd errors rather than silently clobbering "
+                        "one.\n"
+                        "stop_emulator: stop a serial whose AVD lease is held by a "
+                        "DIFFERENT live process (or has no lease record at all); "
+                        "without it, stop_emulator refuses and names the owning pid. "
+                        "Used cross-owner, the result always carries a prominent "
+                        "'warning' field naming whose emulator was killed -- never "
+                        "silent."
                     ),
                 },
                 "apk_path": {
@@ -379,21 +349,21 @@ class AndroidInspectorTool:
                 "package": {
                     "type": "string",
                     "description": (
-                        "Package name (launch, stop_app, logcat). launch resolves the "
+                        "Package name (launch, stop_app, logcat). launch: resolves the "
                         "launcher activity via 'cmd package resolve-activity', falling "
-                        "back to 'monkey -c LAUNCHER' only if resolution yields nothing. "
-                        "logcat: resolves to the package's running pid(s) (pidof, falling "
-                        "back to 'ps -A') and scopes output to them via --pid, composing "
-                        "with 'filter_spec' rather than overriding it. Errors (does not "
-                        "return an empty result) if the package has no running process."
+                        "back to 'monkey -c LAUNCHER' only if that yields nothing. "
+                        "logcat: resolves the package's running pid(s) (pidof, else "
+                        "'ps -A') and scopes output via --pid, composing with "
+                        "'filter_spec' rather than overriding it; errors by name -- "
+                        "never an empty result -- if the package has no running process."
                     ),
                 },
                 "component": {
                     "type": "string",
                     "description": (
-                        "ComponentName pkg/.Activity (launch). Most deterministic: used "
-                        "directly with 'am start -n', no resolve/monkey fallback. "
-                        "Preferred over 'package' when known."
+                        "ComponentName pkg/.Activity (launch). Used directly with "
+                        "'am start -n' -- no resolve/monkey fallback, so the most "
+                        "deterministic path. Preferred over 'package' when known."
                     ),
                 },
                 "selector": {

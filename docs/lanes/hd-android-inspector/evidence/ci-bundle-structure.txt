@@ -1,0 +1,6 @@
+=== CI job 3/3: Bundle structure (YAML) ===
+OK  bundle.md  (bundle.name=android-tester)
+OK  behaviors/android-tester.yaml  (bundle.name=android-tester-behavior)
+
+2 YAML document(s) parsed.
+Bundle structure OK.
