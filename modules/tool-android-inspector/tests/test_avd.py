@@ -509,9 +509,23 @@ def test_check_adb_binary_exec_format_error_remediation(tmp_path) -> None:
     assert "platform-tools-arm64" in result["remediation"]
 
 
-def test_check_adb_binary_fail_when_not_found() -> None:
+def test_check_adb_binary_fail_when_not_found(monkeypatch, tmp_path) -> None:
+    # Hermetic on purpose. This asserts "no adb resolvable ANYWHERE -> fail",
+    # so the *host's* adb has to be excluded or the assertion means nothing.
+    # resolve_adb_binary probes, in order: config['adb_path'],
+    # $ANDROID_HOME/platform-tools{-arm64}/adb, then shutil.which("adb").
+    # GitHub's ubuntu-latest runners ship the Android SDK -- ANDROID_HOME set
+    # and adb on PATH -- so unpinned this test resolved a real adb and the
+    # check correctly reported "ok". The test was wrong, not the code.
+    import amplifier_module_tool_android_inspector.adb as adb_mod
+
+    monkeypatch.setattr(adb_mod.shutil, "which", lambda *_a, **_k: None)
+    monkeypatch.delenv("ANDROID_HOME", raising=False)
+    monkeypatch.delenv("ANDROID_SDK_ROOT", raising=False)
+
     result = check_adb_binary(
-        {"adb_path": "/nonexistent/adb"}, verify=lambda argv: _proc()
+        {"adb_path": "/nonexistent/adb", "android_home": str(tmp_path / "no-sdk")},
+        verify=lambda argv: _proc(),
     )
     assert result["status"] == "fail"
 
@@ -840,12 +854,14 @@ def test_run_doctor_survives_a_check_that_raises(monkeypatch) -> None:
 def test_run_doctor_summary_ready_when_all_ok(monkeypatch) -> None:
     import amplifier_module_tool_android_inspector.avd as avd_mod
 
-    ok_check = lambda *a, **k: {
-        "name": "x",
-        "status": "ok",
-        "detail": "fine",
-        "remediation": None,
-    }
+    def ok_check(*a, **k):
+        return {
+            "name": "x",
+            "status": "ok",
+            "detail": "fine",
+            "remediation": None,
+        }
+
     for name in (
         "check_host_platform",
         "check_android_home",
