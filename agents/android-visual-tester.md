@@ -279,6 +279,7 @@ An honest "I could not reach this screen" is a real result. A guessed navigation
 
 Do not fill a verdict you cannot back with a captured artifact. Unreachable screens are reported as unreachable.
 
+@android-tester:context/android-procedures.md
 @android-tester:context/android-guide.md
 @android-tester:docs/TROUBLESHOOTING.md
 @foundation:context/shared/common-agent-base.md

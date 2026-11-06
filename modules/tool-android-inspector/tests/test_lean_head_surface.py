@@ -7,8 +7,9 @@ Three things are pinned here, and they only mean something together:
    These fail against the pre-change text -- they are what stops the surface
    quietly growing back.
 2. **Fidelity** -- every contract the stock surface stated is still findable
-   (`lean_head_inventory`), plus a stock-DERIVED token census so the check
-   cannot be satisfied by an inventory written from the new text alone.
+   in the tool surface or specialist procedures (`lean_head_inventory`), plus
+   a stock-DERIVED token census. General awareness is only orientation; every
+   specialist imports the complete procedures before doing device work.
 3. **Byte pins** -- the reviewed text itself, so any later edit shows up as a
    diff against a vendored copy rather than as a silent paraphrase.
 
@@ -36,13 +37,14 @@ from .lean_head_inventory import missing
 FIXTURES = Path(__file__).parent / "fixtures" / "lean-head"
 REPO_ROOT = Path(__file__).resolve().parents[3]
 AWARENESS_PATH = REPO_ROOT / "context" / "android-awareness.md"
+PROCEDURES_PATH = REPO_ROOT / "context" / "android-procedures.md"
 AGENTS_DIR = REPO_ROOT / "agents"
 
 # Measured on this branch; every one of these fails against stock.
 DESCRIPTION_BUDGET = 3044          # stock 3,619
 PARAM_DESCRIPTION_BUDGET = 3293    # stock 3,398
 SERIALIZED_BUDGET = 8417           # stock 9,097
-AWARENESS_BUDGET = 2787            # stock 3,413
+AWARENESS_BUDGET = 1050            # detailed procedures load with specialists
 PARAM_CEILING = 600                # per parameter...
 PARAM_CONTRACT_EXEMPTIONS = {"port": 710}  # ...except a named parameter contract
 
@@ -172,7 +174,7 @@ def test_every_stock_tool_contract_survives(tool: AndroidInspectorTool) -> None:
 
 
 def test_every_stock_awareness_contract_survives() -> None:
-    absent = missing(AWARENESS_SEMANTICS, AWARENESS_PATH.read_text())
+    absent = missing(AWARENESS_SEMANTICS, PROCEDURES_PATH.read_text())
     assert absent == [], "awareness contracts lost:\n  " + "\n  ".join(absent)
 
 
@@ -213,7 +215,7 @@ def test_tool_token_census_from_stock_has_zero_absences(
 
 def test_awareness_token_census_from_stock_has_zero_absences() -> None:
     stock_text = (FIXTURES / "stock-android-awareness.md").read_text()
-    lean = AWARENESS_PATH.read_text().lower()
+    lean = PROCEDURES_PATH.read_text().lower()
     absent = sorted(t for t in named_tokens(stock_text) if t not in lean)
     assert absent == [], f"named tokens dropped from the awareness file: {absent}"
 
@@ -249,8 +251,20 @@ def test_description_is_byte_identical_to_the_pinned_text(
     assert tool.description == (FIXTURES / "tool-description.txt").read_text()
 
 
-def test_awareness_is_byte_identical_to_the_pinned_text() -> None:
-    assert AWARENESS_PATH.read_text() == (FIXTURES / "android-awareness.md").read_text()
+def test_specialist_procedures_preserve_the_reviewed_awareness() -> None:
+    assert PROCEDURES_PATH.read_bytes() == (FIXTURES / "android-awareness.md").read_bytes()
+
+
+def test_procedures_are_reachable_in_each_specialist_not_always_loaded() -> None:
+    for agent in AGENTS_DIR.glob("*.md"):
+        assert "@android-tester:context/android-procedures.md" in agent.read_text()
+    behavior = (REPO_ROOT / "behaviors/android-tester.yaml").read_text()
+    assert "android-awareness.md" in behavior
+    assert "android-procedures.md" not in behavior
+    awareness = AWARENESS_PATH.read_text()
+    assert "[Android procedures](android-procedures.md)" in awareness
+    assert "@android-tester:context/android-procedures.md" not in awareness
+    assert "accessibility tree" in awareness and "device serial" in awareness
 
 
 def test_agent_descriptions_are_preserved_byte_for_byte() -> None:
