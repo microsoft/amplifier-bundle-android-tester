@@ -4,6 +4,15 @@
 
 Unit tests pass. Server-side `curl` passes. The user opens the app and every one of the last four fixes is broken. The failure is always at the render/interaction layer, and nothing in the loop has ever looked at the screen. This bundle closes that gap.
 
+## Context loading
+
+General sessions receive a short orientation and keep the tool and specialist
+agents available. Detailed setup and troubleshooting procedures load with each
+specialist, or can be read from `context/android-procedures.md` for direct tool
+use. Device targeting and input safety rules remain in the orientation, tool,
+and specialist instructions. This changes instruction placement, not tool
+operations or device permissions.
+
 ## The Load-Bearing Rule
 
 **uiautomator is the sensor. The screenshot is for judgment, never for targeting.**

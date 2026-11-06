@@ -239,6 +239,7 @@ You get **3 attempts** on any single operation before you stop and report what y
 
 Every row must be backed by real evidence. If a row cannot be honestly filled, mark it `BLOCKED` with the reason rather than inventing a result.
 
+@android-tester:context/android-procedures.md
 @android-tester:context/android-guide.md
 @android-tester:docs/TROUBLESHOOTING.md
 @foundation:context/shared/common-agent-base.md

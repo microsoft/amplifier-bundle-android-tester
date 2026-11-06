@@ -340,6 +340,7 @@ changed: []
 
 If you did not reach a root cause, say so plainly and report the failure-mode determination table anyway — narrowing four possibilities to one is most of the work.
 
+@android-tester:context/android-procedures.md
 @android-tester:context/android-guide.md
 @android-tester:docs/TROUBLESHOOTING.md
 @foundation:context/shared/common-agent-base.md
